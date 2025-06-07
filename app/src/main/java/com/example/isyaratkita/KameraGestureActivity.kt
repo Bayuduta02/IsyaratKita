@@ -1,23 +1,16 @@
 package com.example.isyaratkita
 
 import android.annotation.SuppressLint
-import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
-import android.graphics.RectF
-import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.TotalCaptureResult
+import android.graphics.Matrix
+import android.hardware.camera2.*
 import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.Log
 import android.util.Size
 import android.view.SurfaceHolder
 import android.view.View
@@ -30,10 +23,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.skripsi.utils.AutoFitSurfaceView
 import com.example.skripsi.utils.YuvToRgbConverter
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.objects.ObjectDetection
-import com.google.mlkit.vision.objects.ObjectDetector
-import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
+import com.example.skripsi.utils.getPreviewOutputSize
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
@@ -78,12 +68,6 @@ class KameraGestureActivity : AppCompatActivity() {
         private const val CAMERA_REQUEST_CODE = 1001
         private const val MAX_PREVIEW_WIDTH = 1920
         private const val MAX_PREVIEW_HEIGHT = 1080
-        private const val TAG = "KameraGestureActivity"
-        private const val MODEL_PATH = "sign_language_ssd_mobilenetv2.tflite"
-        private const val LABELS_PATH = "labels.txt"
-        private const val CONFIDENCE_THRESHOLD = 0.5f
-        private const val NUM_THREADS = 4
-        private const val MAX_RESULTS = 3
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -133,58 +117,16 @@ class KameraGestureActivity : AppCompatActivity() {
         })
     }
 
-    private fun validateModelConfiguration() {
-        try {
-            // Verify model file exists
-            val modelFile = assets.open(MODEL_PATH)
-            modelFile.close()
-
-            // Verify labels file exists
-            val labelsFile = assets.open(LABELS_PATH)
-            val labels = labelsFile.bufferedReader().useLines { it.toList() }
-            labelsFile.close()
-
-            if (labels.isEmpty()) {
-                throw Exception("Labels file is empty")
-            }
-
-            Log.d(TAG, "Model validation successful. Found ${labels.size} labels")
-        } catch (e: Exception) {
-            val errorMsg = "Model validation failed: ${e.message}"
-            Log.e(TAG, errorMsg, e)
-            throw Exception(errorMsg)
-        }
-    }
-
     private fun initializeDetector() {
         try {
-            // Validate model configuration first
-            validateModelConfiguration()
-
-            // Initialize ML Kit Object Detector
-            val options = ObjectDetectorOptions.Builder()
-                .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
-                .enableClassification()
-                .enableMultipleObjects()
-                .build()
-
-            objectDetector = ObjectDetection.getClient(options)
+            yuvToRgbConverter = YuvToRgbConverter(this)
+            // Pastikan file model ada di assets folder
+            objectDetector = ObjectDetector(this, "sign_language_ssd_mobilenetv2.tflite")
 
             gestureText.text = "Detector initialized"
-            Log.d(TAG, "Object detector initialized successfully")
-
         } catch (e: Exception) {
-            val errorMsg = "Error initializing detector: ${e.message}"
-            gestureText.text = errorMsg
-            Log.e(TAG, errorMsg, e)
-
-            runOnUiThread {
-                AlertDialog.Builder(this)
-                    .setTitle("Initialization Error")
-                    .setMessage("Failed to initialize gesture detector: ${e.message}")
-                    .setPositiveButton("OK") { _, _ -> finish() }
-                    .show()
-            }
+            gestureText.text = "Error initializing detector: ${e.message}"
+            e.printStackTrace()
         }
     }
 
@@ -282,19 +224,15 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private val imageAvailableListener = ImageReader.OnImageAvailableListener { reader ->
         // Skip frame jika masih memproses frame sebelumnya
-        if (isProcessingFrame) {
-            reader.acquireLatestImage()?.close()
-            return@OnImageAvailableListener
-        }
+        if (isProcessingFrame) return@OnImageAvailableListener
 
         val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
-        var bitmap: Bitmap? = null
 
         isProcessingFrame = true
 
         try {
             // Convert YUV to RGB
-            bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+            val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(image, bitmap)
 
             // Process detection
@@ -304,7 +242,6 @@ class KameraGestureActivity : AppCompatActivity() {
             e.printStackTrace()
         } finally {
             image.close()
-            bitmap?.recycle()
             isProcessingFrame = false
         }
     }
@@ -313,76 +250,48 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             val startTime = System.currentTimeMillis()
 
-            // Convert bitmap to InputImage
-            val image = InputImage.fromBitmap(bitmap, 0)
+            // Run detection
+            val results = objectDetector?.detect(bitmap) ?: emptyList()
 
-            // Process the image
-            objectDetector?.process(image)
-                ?.addOnSuccessListener { detectedObjects ->
-                    val results = detectedObjects.filter {
-                        it.labels.any { label -> label.confidence >= CONFIDENCE_THRESHOLD }
-                    }
+            val processingTime = System.currentTimeMillis() - startTime
 
-                    // Update UI on main thread
-                    runOnUiThread {
-                        if (results.isNotEmpty()) {
-                            // Get the best result
-                            val bestObject = results.maxByOrNull {
-                                it.labels.maxOfOrNull { label -> label.confidence } ?: 0f
-                            }
+            // Update FPS
+            updateFPS()
 
-                            bestObject?.let { obj ->
-                                val bestLabel = obj.labels.maxByOrNull { it.confidence }
-
-                                if (bestLabel != null) {
-                                    // Update UI with detection result
-                                    gestureText.text = bestLabel.text.uppercase()
-                                    confidenceText.text = String.format("Confidence: %.1f%%", bestLabel.confidence * 100)
-
-                                    // Convert Rect to RectF and update overlay
-                                    val boxes = results.mapNotNull { detectedObj ->
-                                        val label = detectedObj.labels.maxByOrNull { it.confidence }
-                                        if (label != null) {
-                                            val rect = detectedObj.boundingBox
-                                            val rectF = RectF(
-                                                rect.left.toFloat(),
-                                                rect.top.toFloat(),
-                                                rect.right.toFloat(),
-                                                rect.bottom.toFloat()
-                                            )
-                                            rectF to "${label.text}\n${String.format("%.1f%%", label.confidence * 100)}"
-                                        } else null
-                                    }
-                                    overlayView.setBoxesAndLabels(boxes)
-
-                                    // Log detection for debugging
-                                    Log.d(TAG, "Detected: ${bestLabel.text} (${bestLabel.confidence})")
-                                }
-                            }
-                        } else {
-                            gestureText.text = getString(R.string.detecting_gesture)
-                            confidenceText.text = "Confidence: --"
-                            overlayView.clearBoxes()
-                        }
-
-                        // Update FPS and processing time
-                        val processingTime = System.currentTimeMillis() - startTime
-                        fpsText.text = String.format("FPS: %.1f | %dms", currentFps, processingTime)
-                    }
-                }
-                ?.addOnFailureListener { e ->
-                    Log.e(TAG, "Detection failed: ${e.message}", e)
-                    runOnUiThread {
-                        gestureText.text = "Detection error: ${e.message}"
-                    }
-                }
+            // Update UI on main thread
+            runOnUiThread {
+                updateDetectionResults(results, processingTime)
+            }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Detection error: ${e.message}", e)
+            e.printStackTrace()
             runOnUiThread {
                 gestureText.text = "Detection error: ${e.message}"
             }
         }
+    }
+
+    private fun updateDetectionResults(results: List<ObjectDetector.DetectionResult>, processingTime: Long) {
+        if (results.isNotEmpty()) {
+            val bestResult = results.maxByOrNull { it.score }
+            bestResult?.let { result ->
+                gestureText.text = result.label.uppercase()
+                confidenceText.text = "Confidence: ${String.format("%.2f", result.score * 100)}%"
+
+                // Update overlay dengan bounding boxes
+                val boxes = results.map {
+                    it.boundingBox to "${it.label} (${String.format("%.2f", it.score)})"
+                }
+                overlayView.setBoxesAndLabels(boxes)
+            }
+        } else {
+            gestureText.text = getString(R.string.detecting_gesture)
+            confidenceText.text = "Confidence: --"
+            overlayView.clearBoxes()
+        }
+
+        // Update processing info
+        fpsText.text = "FPS: $currentFps | ${processingTime}ms"
     }
 
     private fun updateFPS() {
@@ -446,34 +355,20 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private fun updatePreview() {
         try {
-            // Optimize camera settings for real-time detection
-            previewRequestBuilder.apply {
-                // Set auto-focus mode
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
 
-                // Optimize auto-exposure for faster frame processing
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO)
-
-                // Set optimal frame rate range for real-time detection (30fps)
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(30, 30))
-
-                // Optimize auto-white-balance
-                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-            }
+            // Set optimal frame rate untuk real-time processing
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                android.util.Range(15, 30)
+            )
 
             cameraCaptureSession.setRepeatingRequest(
                 previewRequestBuilder.build(),
-                object : CameraCaptureSession.CaptureCallback() {
-                    override fun onCaptureCompleted(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest,
-                        result: TotalCaptureResult
-                    ) {
-                        // Monitor frame capture rate
-                        updateFPS()
-                    }
-                },
+                null,
                 backgroundHandler
             )
         } catch (e: Exception) {
