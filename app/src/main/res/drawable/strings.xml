@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">Skripsi</string>
+    <string name="isyaratkita">Isyarat Kita</string>
+    <string name="welcome_user">Welcome,User</string>
+    <string name="isyarat_kita">Isyarat Kita</string>
+    <string name="panduan_bahasa_isyarat">Panduan Bahasa Isyarat</string>
+    <string name="deskripsi_paduan">Berisikan Bahasa Isyarat Yang Kita Gunakan Di Kehidupan Sehari-hari.</string>
+    <string name="tes">Ini Halaman Panduan Bahasa Isyarat</string>
+    <string name="deteksi_bahasa_isyarat">Deteksi Bahasa Isyarat</string>
+    <string name="switchcamera">SwitchCamera</string>
+    <string name="gesture_detected">%1$s (%2$d%%)</string>
+    <string name="gesture_unknown">Tidak yakin</string>
+    <string name="switch_camera">Switch Camera</string>
+    <string name="detecting_gesture">Tunjukkan gesture tangan Anda</string>
+    <string name="camera_permission_required">Camera permission is required for gesture recognition</string>
+    <string name="model_load_error">Failed to initialize camera and AI model</string>
+    <string name="camera_init_failed">Failed to initialize camera</string>
+    <string name="close">Close</string>
+    <string name="model_init_failed">Gagal memuat model TFLite.</string>
+    <string name="label_unknown">Tidak Dikenal</string>
+</resources>

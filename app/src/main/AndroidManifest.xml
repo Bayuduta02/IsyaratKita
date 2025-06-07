@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 🔹 Izin yang diperlukan oleh aplikasi -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- 🔹 Pastikan aplikasi bisa menggunakan kamera -->
+    <uses-feature android:name="android.hardware.camera.any" android:required="true" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.external" android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        tools:targetApi="31" >
+    <!-- 🔹 Activity utama yang akan diluncurkan saat aplikasi dibuka -->
+    <activity
+        android:name=".MainActivity"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
+    </activity>
+
+    <!-- 🔹 Activity untuk Home -->
+    <activity
+        android:name=".HomeActivity"
+        android:exported="false" />
+
+    <!-- 🔹 Activity untuk Panduan -->
+    <activity
+        android:name=".PanduanHomeActivity"
+        android:exported="true" />
+
+    <!-- 🔹 Activity untuk Kamera Gesture -->
+    <activity
+        android:name=".KameraGestureActivity"
+        android:exported="false"
+        android:screenOrientation="portrait"
+        android:theme="@style/FullscreenTheme"
+        android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode"
+        android:windowSoftInputMode="adjustNothing"
+        android:launchMode="singleTop"
+        tools:ignore="DiscouragedApi,LockedOrientationActivity">
+
+        <!-- Untuk Android 10+ (API 29+) - Notch support -->
+        <meta-data
+            android:name="android.notch.config"
+            android:value="portrait|landscape" />
+
+        <!-- Untuk beberapa vendor seperti Huawei, Xiaomi -->
+        <meta-data
+            android:name="android.max_aspect"
+            android:value="2.4" />
+
+    </activity>
+
+</application>
+
+</manifest>

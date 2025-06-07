@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Isyarat Kita</string>
+    <string name="isyaratkita">Isyarat Kita</string>
+    <string name="welcome_user">Welcome,User</string>
+    <string name="panduan_bahasa_isyarat">Panduan Bahasa Isyarat</string>
+    <string name="deskripsi_paduan">Berisikan Bahasa Isyarat Yang Kita Gunakan Di Kehidupan Sehari-hari.</string>
+    <string name="tes">Ini Halaman Panduan Bahasa Isyarat</string>
+    <string name="close">Close</string>
+    <string name="switch_camera">Switch Camera</string>
+    <string name="detecting_gesture">Tunjukkan gesture tangan Anda</string>
+</resources>
