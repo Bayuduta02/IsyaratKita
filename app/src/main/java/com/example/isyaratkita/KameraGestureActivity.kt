@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
-import android.graphics.Matrix
 import android.hardware.camera2.*
 import android.media.ImageReader
 import android.os.Bundle
@@ -21,9 +20,8 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.example.skripsi.utils.AutoFitSurfaceView
-import com.example.skripsi.utils.YuvToRgbConverter
-import com.example.skripsi.utils.getPreviewOutputSize
+import com.example.isyaratkita.utils.AutoFitSurfaceView
+import com.example.isyaratkita.utils.YuvToRgbConverter
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
@@ -121,7 +119,7 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             yuvToRgbConverter = YuvToRgbConverter(this)
             // Pastikan file model ada di assets folder
-            objectDetector = ObjectDetector(this, "sign_language_ssd_mobilenetv2.tflite")
+            objectDetector = ObjectDetector(this, "best_model.tflite")
 
             gestureText.text = "Detector initialized"
         } catch (e: Exception) {
