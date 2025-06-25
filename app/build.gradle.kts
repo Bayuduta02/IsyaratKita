@@ -15,6 +15,11 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        // Mengabaikan peringatan alignment untuk library native TensorFlow
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
     }
 
     buildTypes {
@@ -36,13 +41,23 @@ android {
     buildFeatures {
         mlModelBinding = true
     }
+    androidResources {
+        noCompress += "tflite"
+    }
+    
+    // Mengabaikan peringatan alignment untuk library native
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
-
-    implementation(libs.google.litert)
-    implementation(libs.google.litert.support)
-    implementation(libs.google.litert.gpu)
+    // TensorFlow Lite
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.tensorflow.lite.support)
     implementation(libs.androidx.viewpager2)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.core.ktx)

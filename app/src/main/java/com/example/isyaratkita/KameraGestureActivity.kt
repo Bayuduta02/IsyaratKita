@@ -24,6 +24,7 @@ import com.example.isyaratkita.utils.AutoFitSurfaceView
 import com.example.isyaratkita.utils.YuvToRgbConverter
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import kotlin.math.max
 
 class KameraGestureActivity : AppCompatActivity() {
 
@@ -40,7 +41,7 @@ class KameraGestureActivity : AppCompatActivity() {
     private lateinit var overlayView: OverlayView
     private lateinit var imageReader: ImageReader
     private lateinit var yuvToRgbConverter: YuvToRgbConverter
-    private var objectDetector: ObjectDetector? = null
+    private var modelBinding: YoloModelBinding? = null
 
     // Background thread untuk image processing
     private var backgroundThread: HandlerThread? = null
@@ -80,14 +81,14 @@ class KameraGestureActivity : AppCompatActivity() {
         initViews()
         setupClickListeners()
         setupSurfaceView()
-        initializeDetector()
+        initializeModel()
     }
 
     private fun initViews() {
         surfaceView = findViewById(R.id.camera_preview)
         gestureText = findViewById(R.id.gesture_text)
-        confidenceText = findViewById(R.id.confidence_text) // Tambahkan di layout
-        fpsText = findViewById(R.id.fps_text) // Tambahkan di layout
+        confidenceText = findViewById(R.id.confidence_text)
+        fpsText = findViewById(R.id.fps_text)
         closeButton = findViewById(R.id.btn_close)
         switchCameraButton = findViewById(R.id.btn_switch_camera)
         overlayView = findViewById(R.id.overlay_view)
@@ -115,15 +116,14 @@ class KameraGestureActivity : AppCompatActivity() {
         })
     }
 
-    private fun initializeDetector() {
+    private fun initializeModel() {
         try {
             yuvToRgbConverter = YuvToRgbConverter(this)
-            // Pastikan file model ada di assets folder
-            objectDetector = ObjectDetector(this, "best_model.tflite")
-
-            gestureText.text = "Detector initialized"
+            // Initialize model binding
+            modelBinding = YoloModelBinding(this)
+            gestureText.text = "Model initialized"
         } catch (e: Exception) {
-            gestureText.text = "Error initializing detector: ${e.message}"
+            gestureText.text = "Error initializing model: ${e.message}"
             e.printStackTrace()
         }
     }
@@ -201,6 +201,7 @@ class KameraGestureActivity : AppCompatActivity() {
             )
 
             surfaceView.setAspectRatio(previewSize.width, previewSize.height)
+            overlayView.setPreviewSize(previewSize.width, previewSize.height)
 
             // Setup ImageReader untuk processing
             imageReader = ImageReader.newInstance(
@@ -228,37 +229,42 @@ class KameraGestureActivity : AppCompatActivity() {
 
         isProcessingFrame = true
 
-        try {
-            // Convert YUV to RGB
-            val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
-            yuvToRgbConverter.yuvToRgb(image, bitmap)
-
-            // Process detection
-            processDetection(bitmap)
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-        } finally {
-            image.close()
-            isProcessingFrame = false
+        // Process in background thread to avoid UI jank
+        backgroundHandler?.post {
+            try {
+                // Convert YUV to RGB efficiently
+                val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+                yuvToRgbConverter.yuvToRgb(image, bitmap)
+                
+                // Close image as soon as possible to free resources
+                image.close()
+                
+                // Process detection
+                processDetection(bitmap)
+                
+            } catch (e: Exception) {
+                e.printStackTrace()
+                image.close()
+            } finally {
+                isProcessingFrame = false
+            }
         }
     }
 
     private fun processDetection(bitmap: Bitmap) {
         try {
-            val startTime = System.currentTimeMillis()
-
-            // Run detection
-            val results = objectDetector?.detect(bitmap) ?: emptyList()
-
-            val processingTime = System.currentTimeMillis() - startTime
+            // Resize bitmap for faster processing if needed
+            val resizedBitmap = resizeBitmapIfNeeded(bitmap)
+            
+            // Run detection with our new model binding
+            val (detections, inferenceTime) = modelBinding?.detect(resizedBitmap) ?: Pair(emptyList(), 0L)
 
             // Update FPS
             updateFPS()
 
             // Update UI on main thread
             runOnUiThread {
-                updateDetectionResults(results, processingTime)
+                updateDetectionResults(detections, inferenceTime)
             }
 
         } catch (e: Exception) {
@@ -268,17 +274,33 @@ class KameraGestureActivity : AppCompatActivity() {
             }
         }
     }
+    
+    private fun resizeBitmapIfNeeded(bitmap: Bitmap): Bitmap {
+        // If bitmap is too large, resize it for faster processing
+        // YOLOv8 works well with 640x640, so we don't need larger images
+        val maxSize = 640
+        
+        if (bitmap.width > maxSize || bitmap.height > maxSize) {
+            val ratio = maxSize.toFloat() / max(bitmap.width, bitmap.height)
+            val newWidth = (bitmap.width * ratio).toInt()
+            val newHeight = (bitmap.height * ratio).toInt()
+            
+            return Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+        }
+        
+        return bitmap
+    }
 
-    private fun updateDetectionResults(results: List<ObjectDetector.DetectionResult>, processingTime: Long) {
+    private fun updateDetectionResults(results: List<YoloModelBinding.Detection>, inferenceTime: Long) {
         if (results.isNotEmpty()) {
-            val bestResult = results.maxByOrNull { it.score }
+            val bestResult = results.maxByOrNull { it.confidence }
             bestResult?.let { result ->
                 gestureText.text = result.label.uppercase()
-                confidenceText.text = "Confidence: ${String.format("%.2f", result.score * 100)}%"
+                confidenceText.text = "Confidence: ${String.format("%.2f", result.confidence * 100)}%"
 
                 // Update overlay dengan bounding boxes
                 val boxes = results.map {
-                    it.boundingBox to "${it.label} (${String.format("%.2f", it.score)})"
+                    it.boundingBox to "${it.label} (${String.format("%.2f", it.confidence)})"
                 }
                 overlayView.setBoxesAndLabels(boxes)
             }
@@ -288,8 +310,8 @@ class KameraGestureActivity : AppCompatActivity() {
             overlayView.clearBoxes()
         }
 
-        // Update processing info
-        fpsText.text = "FPS: $currentFps | ${processingTime}ms"
+        // Update processing info with inference time
+        fpsText.text = "FPS: $currentFps | ${inferenceTime}ms"
     }
 
     private fun updateFPS() {
@@ -353,15 +375,34 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private fun updatePreview() {
         try {
+            // Set autofocus mode for better image quality
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
             )
-
-            // Set optimal frame rate untuk real-time processing
+            
+            // Set optimal exposure for real-time processing
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_MODE,
+                CaptureRequest.CONTROL_AE_MODE_ON
+            )
+            
+            // Set optimal frame rate untuk real-time processing (20-30 FPS)
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                android.util.Range(15, 30)
+                android.util.Range(20, 30)
+            )
+            
+            // Set video stabilization if available
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
+            
+            // Set optimal JPEG quality (for image capture if needed)
+            previewRequestBuilder.set(
+                CaptureRequest.JPEG_QUALITY,
+                95.toByte()
             )
 
             cameraCaptureSession.setRepeatingRequest(
@@ -438,6 +479,6 @@ class KameraGestureActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        objectDetector?.close()
+        modelBinding?.close()
     }
 }
