@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.example.skripsi.utils
+package com.example.isyaratkita.utils
 
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics

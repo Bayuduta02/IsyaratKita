@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.example.skripsi.utils
+package com.example.isyaratkita.utils
 
 import android.graphics.Bitmap
 import android.graphics.Matrix

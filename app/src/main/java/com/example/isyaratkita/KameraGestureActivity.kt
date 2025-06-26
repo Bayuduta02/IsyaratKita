@@ -5,12 +5,19 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
-import android.hardware.camera2.*
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.DisplayMetrics
+import android.util.Log
 import android.util.Size
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
@@ -21,10 +28,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.example.isyaratkita.utils.AutoFitSurfaceView
+import com.example.isyaratkita.utils.CameraSizes.getPreviewOutputSize
 import com.example.isyaratkita.utils.YuvToRgbConverter
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
+import kotlin.math.abs
 
 class KameraGestureActivity : AppCompatActivity() {
 
@@ -62,11 +70,23 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private var currentCameraId: String = ""
     private var isBackCamera: Boolean = true
+    private var sensorOrientation: Int = 0
+    private var screenWidth: Int = 0
+    private var screenHeight: Int = 0
 
     companion object {
+        private const val TAG = "KameraGestureActivity"
         private const val CAMERA_REQUEST_CODE = 1001
+        // Kita pilih resolusi yang tinggi untuk kualitas yang lebih baik
         private const val MAX_PREVIEW_WIDTH = 1920
         private const val MAX_PREVIEW_HEIGHT = 1080
+        private const val DESIRED_PREVIEW_FPS = 30
+        
+        // Rasio aspek 16:9
+        private const val ASPECT_RATIO_16_9 = 16.0f / 9.0f
+        
+        // Toleransi untuk rasio aspek
+        private const val ASPECT_RATIO_TOLERANCE = 0.1f
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +98,14 @@ class KameraGestureActivity : AppCompatActivity() {
                     View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
 
         setContentView(R.layout.camera_activity)
+
+        // Dapatkan ukuran layar
+        val displayMetrics = DisplayMetrics()
+        windowManager.defaultDisplay.getMetrics(displayMetrics)
+        screenWidth = displayMetrics.widthPixels
+        screenHeight = displayMetrics.heightPixels
+        Log.d(TAG, "Screen size: $screenWidth x $screenHeight")
+
         initViews()
         setupClickListeners()
         setupSurfaceView()
@@ -92,13 +120,33 @@ class KameraGestureActivity : AppCompatActivity() {
         closeButton = findViewById(R.id.btn_close)
         switchCameraButton = findViewById(R.id.btn_switch_camera)
         overlayView = findViewById(R.id.overlay_view)
+        
+        // Tambahkan logging untuk memverifikasi bahwa views ditemukan
+        Log.d(TAG, "SurfaceView: $surfaceView")
+        Log.d(TAG, "GestureText: $gestureText")
+        Log.d(TAG, "ConfidenceText: $confidenceText")
+        Log.d(TAG, "FPSText: $fpsText")
+        Log.d(TAG, "CloseButton: $closeButton")
+        Log.d(TAG, "SwitchCameraButton: $switchCameraButton")
+        Log.d(TAG, "OverlayView: $overlayView")
     }
 
     private fun setupClickListeners() {
-        closeButton.setOnClickListener { finish() }
-        switchCameraButton.setOnClickListener {
+        // Tombol close untuk menutup aktivitas
+        closeButton.setOnClickListener { 
+            Log.d(TAG, "Close button clicked")
+            finish() 
+        }
+        
+        // Tombol switch camera untuk berganti antara kamera depan dan belakang
+        switchCameraButton.setOnClickListener { 
+            Log.d(TAG, "Switch camera button clicked")
             isBackCamera = !isBackCamera
+            
+            // Tutup kamera saat ini
             closeCamera()
+            
+            // Buka kamera dengan facing yang baru
             checkCameraPermissionAndOpen()
         }
     }
@@ -109,7 +157,10 @@ class KameraGestureActivity : AppCompatActivity() {
                 checkCameraPermissionAndOpen()
             }
 
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                Log.d(TAG, "Surface changed: $width x $height")
+            }
+            
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 closeCamera()
             }
@@ -190,135 +241,150 @@ class KameraGestureActivity : AppCompatActivity() {
             }
 
             val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
+            
+            // Dapatkan orientasi sensor kamera
+            sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            Log.d(TAG, "Sensor orientation: $sensorOrientation")
+            
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)!!
 
-            // Pilih preview size yang optimal
-            previewSize = chooseOptimalSize(
-                map.getOutputSizes(SurfaceHolder::class.java),
-                surfaceView.width,
-                surfaceView.height,
-                Size(MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT)
+            // Pilih preview size yang optimal dengan rasio 16:9
+            val previewSizes = map.getOutputSizes(SurfaceHolder::class.java)
+            
+            // Gunakan utilitas CameraSizes untuk mendapatkan ukuran preview optimal
+            previewSize = getPreviewOutputSize(
+                windowManager.defaultDisplay, 
+                characteristics, 
+                SurfaceHolder::class.java
             )
-
+            
+            Log.d(TAG, "Selected preview size: ${previewSize.width} x ${previewSize.height}")
+            
+            // Sesuaikan rasio aspek surface view
             surfaceView.setAspectRatio(previewSize.width, previewSize.height)
-            overlayView.setPreviewSize(previewSize.width, previewSize.height)
-
-            // Setup ImageReader untuk processing
+            
+            // Siapkan ImageReader untuk processing frame
             imageReader = ImageReader.newInstance(
-                previewSize.width,
-                previewSize.height,
-                ImageFormat.YUV_420_888,
-                2
+                previewSize.width, 
+                previewSize.height, 
+                ImageFormat.YUV_420_888, 
+                2 // Buffer frames
             )
+            
+            imageReader.setOnImageAvailableListener({ reader ->
+                val image = reader.acquireLatestImage()
+                image?.let { processImage(it) }
+            }, backgroundHandler)
 
-            imageReader.setOnImageAvailableListener(imageAvailableListener, backgroundHandler)
+            // Mulai background thread untuk processing
+            startBackgroundThread()
 
-            cameraManager.openCamera(currentCameraId, cameraStateCallback, backgroundHandler)
+            // Buka kamera
+            cameraManager.openCamera(currentCameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    cameraOpenCloseLock.release()
+                    cameraDevice = camera
+                    createCameraPreviewSession()
+                }
+
+                override fun onDisconnected(camera: CameraDevice) {
+                    cameraOpenCloseLock.release()
+                    camera.close()
+                }
+
+                override fun onError(camera: CameraDevice, error: Int) {
+                    cameraOpenCloseLock.release()
+                    camera.close()
+                    finish()
+                }
+            }, backgroundHandler)
 
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(this, "Error opening camera: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
-
-    private val imageAvailableListener = ImageReader.OnImageAvailableListener { reader ->
-        // Skip frame jika masih memproses frame sebelumnya
-        if (isProcessingFrame) return@OnImageAvailableListener
-
-        val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
-
-        isProcessingFrame = true
-
-        // Process in background thread to avoid UI jank
-        backgroundHandler?.post {
-            try {
-                // Convert YUV to RGB efficiently
-                val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
-                yuvToRgbConverter.yuvToRgb(image, bitmap)
-                
-                // Close image as soon as possible to free resources
-                image.close()
-                
-                // Process detection
-                processDetection(bitmap)
-                
-            } catch (e: Exception) {
-                e.printStackTrace()
-                image.close()
-            } finally {
-                isProcessingFrame = false
-            }
-        }
-    }
-
-    private fun processDetection(bitmap: Bitmap) {
-        try {
-            // Resize bitmap for faster processing if needed
-            val resizedBitmap = resizeBitmapIfNeeded(bitmap)
-            
-            // Run detection with our new model binding
-            val (detections, inferenceTime) = modelBinding?.detect(resizedBitmap) ?: Pair(emptyList(), 0L)
-
-            // Update FPS
-            updateFPS()
-
-            // Update UI on main thread
-            runOnUiThread {
-                updateDetectionResults(detections, inferenceTime)
-            }
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-            runOnUiThread {
-                gestureText.text = "Detection error: ${e.message}"
-            }
-        }
-    }
     
-    private fun resizeBitmapIfNeeded(bitmap: Bitmap): Bitmap {
-        // If bitmap is too large, resize it for faster processing
-        // YOLOv8 works well with 640x640, so we don't need larger images
-        val maxSize = 640
-        
-        if (bitmap.width > maxSize || bitmap.height > maxSize) {
-            val ratio = maxSize.toFloat() / max(bitmap.width, bitmap.height)
-            val newWidth = (bitmap.width * ratio).toInt()
-            val newHeight = (bitmap.height * ratio).toInt()
-            
-            return Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
-        }
-        
-        return bitmap
-    }
-
-    private fun updateDetectionResults(results: List<YoloModelBinding.Detection>, inferenceTime: Long) {
-        if (results.isNotEmpty()) {
-            val bestResult = results.maxByOrNull { it.confidence }
-            bestResult?.let { result ->
-                gestureText.text = result.label.uppercase()
-                confidenceText.text = "Confidence: ${String.format("%.2f", result.confidence * 100)}%"
-
-                // Update overlay dengan bounding boxes
-                val boxes = results.map {
-                    it.boundingBox to "${it.label} (${String.format("%.2f", it.confidence)})"
+    private fun needsSwappedDimensions(screenOrientation: Int): Boolean {
+        var swappedDimensions = false
+        when (screenOrientation) {
+            Surface.ROTATION_0, Surface.ROTATION_180 -> {
+                if (sensorOrientation == 90 || sensorOrientation == 270) {
+                    swappedDimensions = true
                 }
-                overlayView.setBoxesAndLabels(boxes)
             }
-        } else {
-            gestureText.text = getString(R.string.detecting_gesture)
-            confidenceText.text = "Confidence: --"
-            overlayView.clearBoxes()
+            Surface.ROTATION_90, Surface.ROTATION_270 -> {
+                if (sensorOrientation == 0 || sensorOrientation == 180) {
+                    swappedDimensions = true
+                }
+            }
         }
-
-        // Update processing info with inference time
-        fpsText.text = "FPS: $currentFps | ${inferenceTime}ms"
+        
+        Log.d(TAG, "Screen orientation: $screenOrientation, sensor orientation: $sensorOrientation")
+        Log.d(TAG, "Swapped dimensions: $swappedDimensions")
+        
+        return swappedDimensions
     }
 
-    private fun updateFPS() {
+    private fun processImage(image: android.media.Image) {
+        // Hindari proses bersamaan
+        if (isProcessingFrame) {
+            image.close()
+            return
+        }
+        
+        isProcessingFrame = true
+        
+        try {
+            // Konversi YUV ke Bitmap
+            val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+            yuvToRgbConverter.yuvToRgb(image, bitmap)
+            
+            // Proses dengan model
+            modelBinding?.let { model ->
+                val (results, inferenceTime) = model.detect(bitmap)
+                
+                // Update UI di thread utama
+                runOnUiThread {
+                    // Update overlay dengan hasil deteksi
+                    overlayView.setResults(results)
+                    
+                    // Update teks gesture dan confidence
+                    if (results.isNotEmpty()) {
+                        val topResult = results.first()
+                        gestureText.text = topResult.label
+                        confidenceText.text = "Confidence: ${String.format("%.2f", topResult.confidence * 100)}%"
+                    } else {
+                        gestureText.text = "Detecting gesture..."
+                        confidenceText.text = "Confidence: --"
+                    }
+                    
+                    // Update FPS dan inference time
+                    fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${inferenceTime}ms"
+                    
+                    // Hitung FPS
+                    updateFps()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing image: ${e.message}")
+            e.printStackTrace()
+        } finally {
+            image.close()
+            isProcessingFrame = false
+        }
+    }
+
+    private fun updateFps() {
         frameCount++
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastFpsTime >= 1000) {
-            currentFps = frameCount.toFloat()
+        val elapsedTime = currentTime - lastFpsTime
+        
+        if (elapsedTime > 1000) {
+            currentFps = frameCount.toFloat() / (elapsedTime / 1000f)
+            fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${elapsedTime}ms"
+            
+            // Reset counter
             frameCount = 0
             lastFpsTime = currentTime
         }
@@ -390,19 +456,13 @@ class KameraGestureActivity : AppCompatActivity() {
             // Set optimal frame rate untuk real-time processing (20-30 FPS)
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                android.util.Range(20, 30)
+                android.util.Range(20, DESIRED_PREVIEW_FPS)
             )
             
             // Set video stabilization if available
             previewRequestBuilder.set(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
-            )
-            
-            // Set optimal JPEG quality (for image capture if needed)
-            previewRequestBuilder.set(
-                CaptureRequest.JPEG_QUALITY,
-                95.toByte()
             )
 
             cameraCaptureSession.setRepeatingRequest(
@@ -434,31 +494,52 @@ class KameraGestureActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Memilih ukuran preview yang optimal dengan preferensi rasio 16:9
+     */
     private fun chooseOptimalSize(
         choices: Array<Size>,
-        textureViewWidth: Int,
-        textureViewHeight: Int,
+        width: Int,
+        height: Int,
         maxSize: Size
     ): Size {
-        val bigEnough = mutableListOf<Size>()
-        val notBigEnough = mutableListOf<Size>()
-        val w = maxSize.width
-        val h = maxSize.height
-
-        for (option in choices) {
-            if (option.width <= w && option.height <= h) {
-                if (option.width >= textureViewWidth && option.height >= textureViewHeight) {
-                    bigEnough.add(option)
-                } else {
-                    notBigEnough.add(option)
-                }
-            }
+        // Daftar semua ukuran yang tersedia untuk debugging
+        Log.d(TAG, "Available preview sizes: ${choices.joinToString { "${it.width}x${it.height}" }}")
+        
+        // Filter ukuran yang tidak melebihi batasan maksimal
+        val validSizes = choices.filter { 
+            it.width <= maxSize.width && it.height <= maxSize.height
         }
-
+        
+        if (validSizes.isEmpty()) {
+            Log.e(TAG, "Tidak dapat menemukan ukuran preview yang sesuai")
+            return choices.sortedBy { 
+                abs(it.width * it.height - width * height) 
+            }.first()
+        }
+        
+        // Cari ukuran yang memiliki rasio 16:9
+        val aspectRatio16by9Sizes = validSizes.filter { size ->
+            val ratio = size.width.toFloat() / size.height.toFloat()
+            val isRatio16by9 = abs(ratio - ASPECT_RATIO_16_9) < ASPECT_RATIO_TOLERANCE
+            Log.d(TAG, "Size ${size.width}x${size.height}, ratio: $ratio, is 16:9: $isRatio16by9")
+            isRatio16by9
+        }
+        
+        // Logika pemilihan: prioritaskan rasio 16:9, kemudian pilih yang terbesar
         return when {
-            bigEnough.size > 0 -> bigEnough.minByOrNull { it.width * it.height }!!
-            notBigEnough.size > 0 -> notBigEnough.maxByOrNull { it.width * it.height }!!
-            else -> choices[0]
+            // Jika ada ukuran dengan rasio 16:9, pilih yang terbesar
+            aspectRatio16by9Sizes.isNotEmpty() -> {
+                val largestSize = aspectRatio16by9Sizes.maxByOrNull { it.width * it.height }!!
+                Log.d(TAG, "Menggunakan ukuran preview 16:9: ${largestSize.width}x${largestSize.height}")
+                largestSize
+            }
+            // Jika tidak ada, cari ukuran terbesar yang tersedia
+            else -> {
+                val bestSize = validSizes.maxByOrNull { it.width * it.height }!!
+                Log.d(TAG, "Tidak ada ukuran dengan rasio 16:9, menggunakan ukuran terbesar: ${bestSize.width}x${bestSize.height}")
+                bestSize
+            }
         }
     }
 

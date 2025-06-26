@@ -50,6 +50,9 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        resources {
+            excludes += listOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/LICENSE.txt", "META-INF/license.txt", "META-INF/NOTICE", "META-INF/NOTICE.txt", "META-INF/notice.txt", "META-INF/ASL2.0")
+        }
     }
 }
 
@@ -58,6 +61,8 @@ dependencies {
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)
     implementation(libs.tensorflow.lite.support)
+    implementation(libs.tensorflow.lite.metadata)
+    
     implementation(libs.androidx.viewpager2)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.core.ktx)
