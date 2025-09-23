@@ -8,6 +8,7 @@ import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.gpu.GpuDelegateFactory
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -39,7 +40,8 @@ class Model private constructor(
                     setNumThreads(4)
                     if (compatList.isDelegateSupportedOnThisDevice) {
                         try {
-                            gpuDelegate = GpuDelegate(compatList.bestOptionsForThisDevice)
+                            val delegateOptions = compatList.bestOptionsForThisDevice
+                            gpuDelegate = GpuDelegate(delegateOptions)
                             addDelegate(gpuDelegate)
                             Log.d(TAG, "GPU delegate enabled.")
                         } catch (delegateError: Exception) {
