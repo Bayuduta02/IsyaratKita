@@ -39,7 +39,7 @@ android {
         jvmTarget = "11"
     }
     buildFeatures {
-        mlModelBinding = true
+        mlModelBinding = false
     }
     androidResources {
         noCompress += "tflite"
@@ -59,7 +59,7 @@ android {
 dependencies {
     // TensorFlow Lite
     implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.tensorflow.lite.gpu.v2170)
     implementation(libs.tensorflow.lite.support)
     implementation(libs.tensorflow.lite.metadata)
     

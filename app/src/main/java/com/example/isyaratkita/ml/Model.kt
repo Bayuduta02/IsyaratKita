@@ -4,48 +4,65 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 class Model private constructor(
     private val interpreter: Interpreter,
-    private val labels: List<String>
+    private val gpuDelegate: GpuDelegate?,
+    val labels: List<String>
 ) {
 
     companion object {
         private const val TAG = "Model"
-        private const val MODEL_NAME = "model.tflite" // Pastikan nama file TFLite Anda sesuai
+        private const val MODEL_NAME = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
-
-        // Parameter ini sesuai dengan metadata.yaml Anda
-        private const val INPUT_SIZE = 640
-        private const val NUM_CHANNELS = 3
-        private const val CONF_THRESHOLD = 0.50f // Anda bisa sesuaikan threshold ini jika perlu
+        private const val CONF_THRESHOLD = 0.5f
 
         fun newInstance(context: Context): Model {
-            val options = Interpreter.Options().apply {
-                setNumThreads(4)
-                val compatList = CompatibilityList()
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    addDelegate(GpuDelegate())
-                    Log.d(TAG, "GPU Delegate is enabled.")
-                } else {
-                    Log.d(TAG, "GPU Delegate is not supported, using CPU.")
-                }
-            }
+            val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
+            val labels = FileUtil.loadLabels(context, LABELS_FILE)
 
-            try {
-                val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
-                val interpreter = Interpreter(modelBuffer, options)
-                val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
-                return Model(interpreter, labels)
-            } catch (e: Exception) {
-                throw RuntimeException("Error initializing TFLite Model: ${e.message}")
+            var gpuDelegate: GpuDelegate? = null
+            val compatList = CompatibilityList()
+
+            val interpreter = try {
+                val options = Interpreter.Options().apply {
+                    setNumThreads(4)
+                    if (compatList.isDelegateSupportedOnThisDevice) {
+                        try {
+                            gpuDelegate = GpuDelegate(compatList.bestOptionsForThisDevice)
+                            addDelegate(gpuDelegate)
+                            Log.d(TAG, "GPU delegate enabled.")
+                        } catch (delegateError: Exception) {
+                            Log.w(TAG, "Unable to enable GPU delegate: ${delegateError.message}")
+                            gpuDelegate?.close()
+                            gpuDelegate = null
+                        }
+                    }
+                }
+                Interpreter(modelBuffer, options)
+            } catch (interpreterError: Exception) {
+                Log.w(TAG, "Falling back to CPU interpreter: ${interpreterError.message}")
+                gpuDelegate?.close()
+                gpuDelegate = null
+
+                val cpuOptions = Interpreter.Options().apply {
+                    setNumThreads(4)
+                    setUseNNAPI(false)
+                    setUseXNNPACK(true)
+                }
+                Interpreter(modelBuffer, cpuOptions)
             }
+            return Model(interpreter, gpuDelegate, labels)
         }
     }
 
@@ -54,136 +71,152 @@ class Model private constructor(
         val score: Float,
         val boundingBox: FloatArray,
         val label: String
-    ) {
-        override fun equals(other: Any?): Boolean {
-            if (this === other) return true
-            if (javaClass != other?.javaClass) return false
-            other as DetectionResult
-            if (classIndex != other.classIndex) return false
-            if (score != other.score) return false
-            if (!boundingBox.contentEquals(other.boundingBox)) return false
-            if (label != other.label) return false
-            return true
-        }
+    )
 
-        override fun hashCode(): Int {
-            var result = classIndex
-            result = 31 * result + score.hashCode()
-            result = 31 * result + boundingBox.contentHashCode()
-            result = 31 * result + label.hashCode()
-            return result
+    private val inputTensor = interpreter.getInputTensor(0)
+    private val inputDataType: DataType = inputTensor.dataType()
+    private val inputQuantParams = inputTensor.quantizationParams()
+    private val inputShape: IntArray = inputTensor.shape()
+
+    val inputWidth: Int
+    val inputHeight: Int
+    private val inputChannels: Int
+
+    private val inputByteBuffer: ByteBuffer
+    private val inputIntBuffer: IntArray
+
+    private val outputTensor = interpreter.getOutputTensor(0)
+    private val outputShape: IntArray = outputTensor.shape()
+    private val outputByteBuffer: ByteBuffer = ByteBuffer.allocateDirect(
+        outputTensor.numElements() * outputTensor.dataType().byteSize()
+    ).order(ByteOrder.nativeOrder())
+
+    private val scratchOutput = FloatArray(outputTensor.numElements())
+
+    init {
+        require(inputShape.size == 4) { "Unsupported input tensor shape: ${inputShape.contentToString()}" }
+
+        val (heightIndex, widthIndex, channelsIndex) = if (inputShape[3] == 3) {
+            Triple(1, 2, 3)
+        } else {
+            Triple(2, 3, 1)
         }
+        inputHeight = inputShape[heightIndex]
+        inputWidth = inputShape[widthIndex]
+        inputChannels = inputShape[channelsIndex]
+
+        require(inputChannels == 3) { "Model expects 3 input channels but found $inputChannels" }
+
+        val inputBytes = inputTensor.numElements() * inputDataType.byteSize()
+        inputByteBuffer = ByteBuffer.allocateDirect(inputBytes).order(ByteOrder.nativeOrder())
+        inputIntBuffer = IntArray(inputWidth * inputHeight)
     }
 
     fun process(bitmap: Bitmap): Pair<List<DetectionResult>, Long> {
-        val inputBuffer = preprocessImage(bitmap)
-
-        // Output model tetap float, jadi bagian ini tidak berubah
-        val outputShape = interpreter.getOutputTensor(0).shape()
-        val outputBuffer = ByteBuffer.allocateDirect(outputShape.fold(4) { acc, dim -> acc * dim })
-            .order(ByteOrder.nativeOrder())
-
+        if (bitmap.width != inputWidth || bitmap.height != inputHeight) {
+            throw IllegalArgumentException("Bitmap size must match model input size $inputWidth x $inputHeight")
+        }
+        preprocessImage(bitmap)
+        outputByteBuffer.rewind()
         val startTime = SystemClock.elapsedRealtimeNanos()
-        interpreter.run(inputBuffer, outputBuffer)
+        interpreter.run(inputByteBuffer, outputByteBuffer)
         val inferenceTime = (SystemClock.elapsedRealtimeNanos() - startTime) / 1_000_000
 
-        outputBuffer.rewind()
-        val detections = postprocessDetections(outputBuffer, outputShape)
+        outputByteBuffer.rewind()
+        val detections = postprocessDetections()
 
         return Pair(detections, inferenceTime)
     }
 
-    /**
-     * --- PERBAIKAN TOTAL UNTUK MODEL INT8 ---
-     * Fungsi ini diubah untuk model int8 (terkuantisasi).
-     * Tidak ada lagi normalisasi float (pembagian dengan 255.0f).
-     * Data piksel (0-255) langsung dimasukkan sebagai Byte.
-     */
-    private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
-        // Bitmap yang masuk diasumsikan sudah berukuran INPUT_SIZE x INPUT_SIZE
-        // Alokasi buffer untuk Byte (1 byte per channel), bukan Float (4 bytes).
-        val inputBuffer = ByteBuffer.allocateDirect(1 * NUM_CHANNELS * INPUT_SIZE * INPUT_SIZE)
-            .order(ByteOrder.nativeOrder())
+    private fun preprocessImage(bitmap: Bitmap) {
+        inputByteBuffer.rewind()
+        bitmap.getPixels(inputIntBuffer, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        when (inputDataType) {
+            DataType.FLOAT32 -> {
+                val floatBuffer = inputByteBuffer.asFloatBuffer()
+                floatBuffer.rewind()
+                for (pixel in inputIntBuffer) {
+                    floatBuffer.put(((pixel shr 16) and 0xFF) / 255f)
+                    floatBuffer.put(((pixel shr 8) and 0xFF) / 255f)
+                    floatBuffer.put((pixel and 0xFF) / 255f)
+                }
+            }
+            DataType.UINT8 -> {
+                for (pixel in inputIntBuffer) {
+                    inputByteBuffer.put(((pixel shr 16) and 0xFF).toByte())
+                    inputByteBuffer.put(((pixel shr 8) and 0xFF).toByte())
+                    inputByteBuffer.put((pixel and 0xFF).toByte())
+                }
+            }
+            DataType.INT8 -> {
+                val scale = inputQuantParams.scale.toFloat()
+                val zeroPoint = inputQuantParams.zeroPoint
 
-        for (pixel in pixels) {
-            // Ekstrak channel warna dan masukan sebagai Byte
-            inputBuffer.put(((pixel shr 16) and 0xFF).toByte()) // R
-            inputBuffer.put(((pixel shr 8) and 0xFF).toByte())  // G
-            inputBuffer.put((pixel and 0xFF).toByte())          // B
+                for (pixel in inputIntBuffer) {
+                    quantizeChannel((pixel shr 16) and 0xFF, scale, zeroPoint)
+                    quantizeChannel((pixel shr 8) and 0xFF, scale, zeroPoint)
+                    quantizeChannel(pixel and 0xFF, scale, zeroPoint)
+                }
+            }
+            else -> throw IllegalArgumentException("Unsupported input data type: $inputDataType")
         }
 
-        inputBuffer.rewind()
-        return inputBuffer
+        inputByteBuffer.rewind()
     }
 
-    /**
-     * Fungsi ini memproses output dari model.
-     * Karena output model tetap dalam bentuk float, fungsi ini tidak banyak berubah.
-     */
-    private fun postprocessDetections(
-        outputBuffer: ByteBuffer,
-        outputShape: IntArray
-    ): List<DetectionResult> {
-        val numBoxes = outputShape[2]
-        val floatBuffer = outputBuffer.asFloatBuffer()
+    private fun quantizeChannel(value: Int, scale: Float, zeroPoint: Int) {
+        val normalized = value / 255f
+        val quantized = (normalized / scale + zeroPoint).roundToInt().coerceIn(-128, 127)
+        inputByteBuffer.put(quantized.toByte())
+    }
 
-        val detections = mutableListOf<DetectionResult>()
+    private fun postprocessDetections(): List<DetectionResult> {
+        val floatBuffer = outputByteBuffer.asFloatBuffer()
+        floatBuffer.rewind()
+        floatBuffer.get(scratchOutput)
 
-        val transposedOutput = Array(numBoxes) { FloatArray(outputShape[1]) }
-        for (i in 0 until outputShape[1]) {
-            for (j in 0 until numBoxes) {
-                transposedOutput[j][i] = floatBuffer.get(i * numBoxes + j)
-            }
-        }
+        val features = outputShape[1]
+        val boxes = outputShape[2]
 
-        for (i in 0 until numBoxes) {
-            val detection = transposedOutput[i]
+        val results = ArrayList<DetectionResult>()
+        for (boxIndex in 0 until boxes) {
+            var bestScore = 0f
+            var bestClassIndex = -1
 
-            var maxScore = 0f
-            var classIndex = -1
-            // Skor kelas dimulai dari indeks ke-4
-            for (j in 4 until detection.size) {
-                if (detection[j] > maxScore) {
-                    maxScore = detection[j]
-                    classIndex = j - 4
+            for (classOffset in 4 until features) {
+                val score = scratchOutput[classOffset * boxes + boxIndex]
+                if (score > bestScore) {
+                    bestScore = score
+                    bestClassIndex = classOffset - 4
                 }
             }
+            if (bestScore < CONF_THRESHOLD || bestClassIndex !in labels.indices) continue
 
-            if (maxScore >= CONF_THRESHOLD) {
-                val box = floatArrayOf(detection[0], detection[1], detection[2], detection[3])
+            val xCenter = scratchOutput[0 * boxes + boxIndex] * inputWidth
+            val yCenter = scratchOutput[1 * boxes + boxIndex] * inputHeight
+            val width = scratchOutput[2 * boxes + boxIndex] * inputWidth
+            val height = scratchOutput[3 * boxes + boxIndex] * inputHeight
 
-                // Konversi dari [center_x, center_y, width, height] ke [x1, y1, x2, y2]
-                // dalam koordinat piksel (relatif ke INPUT_SIZE)
-                val xCenter = box[0] * INPUT_SIZE
-                val yCenter = box[1] * INPUT_SIZE
-                val w = box[2] * INPUT_SIZE
-                val h = box[3] * INPUT_SIZE
+            val left = max(0f, xCenter - width / 2f)
+            val top = max(0f, yCenter - height / 2f)
+            val right = min(inputWidth.toFloat(), xCenter + width / 2f)
+            val bottom = min(inputHeight.toFloat(), yCenter + height / 2f)
 
-                val x1 = xCenter - w / 2
-                val y1 = yCenter - h / 2
-                val x2 = xCenter + w / 2
-                val y2 = yCenter + h / 2
-
-                // Pastikan classIndex valid sebelum mengakses array labels
-                if (classIndex in labels.indices) {
-                    detections.add(
-                        DetectionResult(
-                            classIndex,
-                            maxScore,
-                            floatArrayOf(x1, y1, x2, y2),
-                            labels[classIndex]
-                        )
-                    )
-                }
-            }
+            results.add(
+                DetectionResult(
+                    classIndex = bestClassIndex,
+                    score = bestScore,
+                    boundingBox = floatArrayOf(left, top, right, bottom),
+                    label = labels[bestClassIndex]
+                )
+            )
         }
-        return detections
+        return results.sortedByDescending { it.score }
     }
 
     fun close() {
+        gpuDelegate?.close()
         interpreter.close()
     }
 }

@@ -49,6 +49,8 @@ class KameraGestureActivity : AppCompatActivity() {
     private lateinit var imageReader: ImageReader
     private lateinit var yuvToRgbConverter: YuvToRgbConverter
     private var modelBinding: YoloModelBinding? = null
+    private var modelInputWidth = 640
+    private var modelInputHeight = 640
 
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
@@ -75,8 +77,6 @@ class KameraGestureActivity : AppCompatActivity() {
     // --- PERBAIKAN ---
     // Menggunakan konstanta dari Model.kt sebagai satu-satunya sumber kebenaran
     // untuk ukuran input model.
-    private val modelInputSize = 640
-
     companion object {
         private const val TAG = "KameraGestureActivity"
         private const val CAMERA_REQUEST_CODE = 1001
@@ -122,7 +122,7 @@ class KameraGestureActivity : AppCompatActivity() {
                 checkCameraPermissionAndOpen()
             }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                overlayView.setPreviewSize(width, height)
+
             }
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 closeCamera()
@@ -134,6 +134,9 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             yuvToRgbConverter = YuvToRgbConverter(this)
             modelBinding = YoloModelBinding(this)
+            modelInputWidth = modelBinding?.inputWidth ?: modelInputWidth
+            modelInputHeight = modelBinding?.inputHeight ?: modelInputHeight
+            overlayView.setModelInputSize(modelInputWidth, modelInputHeight)
             gestureText.text = "Model siap"
         } catch (e: Exception) {
             gestureText.text = "Error: ${e.message}"
@@ -208,7 +211,7 @@ class KameraGestureActivity : AppCompatActivity() {
             val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(image, bitmap)
 
-            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
+            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, modelInputWidth, modelInputHeight, true)
             bitmap.recycle() // Recycle bitmap asli setelah di-scaling
 
             modelBinding?.let { model ->
@@ -233,7 +236,7 @@ class KameraGestureActivity : AppCompatActivity() {
                         confidenceText.text = "Akurasi: --"
                     }
                     updateFps()
-                    fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${totalProcessingTime}ms"
+                    fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${totalProcessingTime}ms | Inference: ${inferenceTime}ms"
                 }
             }
             scaledBitmap.recycle()
