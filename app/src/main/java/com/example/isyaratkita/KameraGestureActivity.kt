@@ -316,11 +316,22 @@ class KameraGestureActivity : AppCompatActivity() {
         val offsetX = letterboxResult.offsetX
         val offsetY = letterboxResult.offsetY
 
+        val letterboxedWidth = letterboxResult.bitmap.width.toFloat().coerceAtLeast(1f)
+        val letterboxedHeight = letterboxResult.bitmap.height.toFloat().coerceAtLeast(1f)
+
         for (detection in detections) {
-            val left = (detection.boundingBox.left - offsetX) * inverseScale
-            val top = (detection.boundingBox.top - offsetY) * inverseScale
-            val right = (detection.boundingBox.right - offsetX) * inverseScale
-            val bottom = (detection.boundingBox.bottom - offsetY) * inverseScale
+            val rawBox = detection.boundingBox
+            val isNormalizedBox = rawBox.right <= 1f && rawBox.bottom <= 1f
+
+            val boxLeft = if (isNormalizedBox) rawBox.left * letterboxedWidth else rawBox.left
+            val boxTop = if (isNormalizedBox) rawBox.top * letterboxedHeight else rawBox.top
+            val boxRight = if (isNormalizedBox) rawBox.right * letterboxedWidth else rawBox.right
+            val boxBottom = if (isNormalizedBox) rawBox.bottom * letterboxedHeight else rawBox.bottom
+
+            val left = (boxLeft - offsetX) * inverseScale
+            val top = (boxTop - offsetY) * inverseScale
+            val right = (boxRight - offsetX) * inverseScale
+            val bottom = (boxBottom - offsetY) * inverseScale
 
             if (right <= 0f || bottom <= 0f || left >= previewWidth || top >= previewHeight) {
                 continue
