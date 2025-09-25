@@ -14,7 +14,10 @@ import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.DisplayMetrics
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Log
 import android.util.Size
 import android.view.SurfaceHolder
@@ -32,6 +35,8 @@ import com.example.isyaratkita.utils.YuvToRgbConverter
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 class KameraGestureActivity : AppCompatActivity() {
 
@@ -80,6 +85,7 @@ class KameraGestureActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "KameraGestureActivity"
         private const val CAMERA_REQUEST_CODE = 1001
+        private const val MIN_CONFIDENCE = 0.30f
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -208,27 +214,36 @@ class KameraGestureActivity : AppCompatActivity() {
     private fun processImage(image: android.media.Image) {
         try {
             val startTime = System.currentTimeMillis()
-            val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
-            yuvToRgbConverter.yuvToRgb(image, bitmap)
+            val previewWidth = image.width
+            val previewHeight = image.height
+            val previewBitmap = Bitmap.createBitmap(previewWidth, previewHeight, Bitmap.Config.ARGB_8888)
+            yuvToRgbConverter.yuvToRgb(image, previewBitmap)
 
-            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, modelInputWidth, modelInputHeight, true)
-            bitmap.recycle() // Recycle bitmap asli setelah di-scaling
+            val letterboxResult = createLetterboxedBitmap(previewBitmap, modelInputWidth, modelInputHeight)
+            previewBitmap.recycle()
 
             modelBinding?.let { model ->
-                val (results, inferenceTime) = model.detect(scaledBitmap)
+                val (rawResults, inferenceTime) = model.detect(letterboxResult.bitmap)
+                val mappedResults = mapDetectionsToPreview(
+                    rawResults,
+                    letterboxResult,
+                    previewWidth,
+                    previewHeight
+                )
 
-                // Logika penskalaan yang salah di sini DIHAPUS.
-                // 'results' sekarang berisi koordinat relatif terhadap gambar 640x640.
-                // Biarkan OverlayView yang menangani penskalaan ke layar.
+                val finalResults = mappedResults
+                    .filter { it.confidence >= MIN_CONFIDENCE }
+                    .sortedByDescending { it.confidence }
+                    .take(1)
 
                 val totalProcessingTime = System.currentTimeMillis() - startTime
 
                 runOnUiThread {
-                    // Kirim 'results' yang asli langsung ke OverlayView
-                    overlayView.setResults(results)
+                    overlayView.setModelInputSize(previewWidth, previewHeight)
+                    overlayView.setResults(mappedResults)
 
-                    if (results.isNotEmpty()) {
-                        val topResult = results.first()
+                    if (mappedResults.isNotEmpty()) {
+                        val topResult = mappedResults.first()
                         gestureText.text = topResult.label.uppercase()
                         confidenceText.text = "Akurasi: ${String.format("%.1f", topResult.confidence * 100)}%"
                     } else {
@@ -239,13 +254,91 @@ class KameraGestureActivity : AppCompatActivity() {
                     fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${totalProcessingTime}ms | Inference: ${inferenceTime}ms"
                 }
             }
-            scaledBitmap.recycle()
+            letterboxResult.bitmap.recycle()
         } catch (e: Exception) {
             Log.e(TAG, "Error processing image: ${e.message}")
         } finally {
             image.close()
             isProcessingFrame.set(false)
         }
+    }
+
+    private data class LetterboxResult(
+        val bitmap: Bitmap,
+        val scale: Float,
+        val offsetX: Float,
+        val offsetY: Float
+    )
+
+    private fun createLetterboxedBitmap(
+        source: Bitmap,
+        targetWidth: Int,
+        targetHeight: Int
+    ): LetterboxResult {
+        if (source.width == 0 || source.height == 0) {
+            val emptyBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            return LetterboxResult(emptyBitmap, 1f, 0f, 0f)
+        }
+
+        val scale = min(
+            targetWidth.toFloat() / source.width.toFloat(),
+            targetHeight.toFloat() / source.height.toFloat()
+        )
+
+        val scaledWidth = (source.width * scale).roundToInt().coerceAtLeast(1)
+        val scaledHeight = (source.height * scale).roundToInt().coerceAtLeast(1)
+
+        if (scaledWidth == targetWidth && scaledHeight == targetHeight) {
+            return LetterboxResult(source.copy(Bitmap.Config.ARGB_8888, false), scale, 0f, 0f)
+        }
+
+        val outputBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(outputBitmap)
+        canvas.drawColor(Color.BLACK)
+
+        val left = (targetWidth - scaledWidth) / 2f
+        val top = (targetHeight - scaledHeight) / 2f
+        val destRect = RectF(left, top, left + scaledWidth, top + scaledHeight)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+        canvas.drawBitmap(source, null, destRect, paint)
+
+        return LetterboxResult(outputBitmap, scale, left, top)
+    }
+
+    private fun mapDetectionsToPreview(
+        detections: List<YoloModelBinding.Detection>,
+        letterboxResult: LetterboxResult,
+        previewWidth: Int,
+        previewHeight: Int
+    ): List<YoloModelBinding.Detection> {
+        if (detections.isEmpty()) return emptyList()
+
+        val mappedDetections = ArrayList<YoloModelBinding.Detection>(detections.size)
+        val inverseScale = if (letterboxResult.scale == 0f) 1f else 1f / letterboxResult.scale
+        val offsetX = letterboxResult.offsetX
+        val offsetY = letterboxResult.offsetY
+
+        for (detection in detections) {
+            val left = (detection.boundingBox.left - offsetX) * inverseScale
+            val top = (detection.boundingBox.top - offsetY) * inverseScale
+            val right = (detection.boundingBox.right - offsetX) * inverseScale
+            val bottom = (detection.boundingBox.bottom - offsetY) * inverseScale
+
+            if (right <= 0f || bottom <= 0f || left >= previewWidth || top >= previewHeight) {
+                continue
+            }
+
+            val clippedRect = RectF(
+                left.coerceIn(0f, previewWidth.toFloat()),
+                top.coerceIn(0f, previewHeight.toFloat()),
+                right.coerceIn(0f, previewWidth.toFloat()),
+                bottom.coerceIn(0f, previewHeight.toFloat())
+            )
+
+            mappedDetections.add(detection.copy(boundingBox = clippedRect))
+        }
+
+        return mappedDetections
     }
 
     private fun createCameraPreviewSession() {
