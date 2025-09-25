@@ -10,10 +10,11 @@ espressoCore = "3.6.1"
 appcompat = "1.7.1"
 material = "1.12.0"
 tensorflowLite = "2.14.0"
+tensorflowLiteGpu = "2.14.0"
+tensorflowLiteGpuApi = "2.14.0"
 tensorflowLiteSupport = "0.4.4"
 tensorflowLiteMetadata = "0.4.4"
 viewpager2 = "1.1.0"
-litertGpuApi = "1.4.0"
 
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraView" }
@@ -33,8 +34,8 @@ material = { group = "com.google.android.material", name = "material", version.r
 tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tensorflowLite" }
 tensorflow-lite-support = { module = "org.tensorflow:tensorflow-lite-support", version.ref = "tensorflowLiteSupport" }
 tensorflow-lite-metadata = { module = "org.tensorflow:tensorflow-lite-metadata", version.ref = "tensorflowLiteMetadata" }
-litert-gpu-api = { group = "com.google.ai.edge.litert", name = "litert-gpu-api", version.ref = "litertGpuApi" }
-tensorflow-tensorflow-lite-gpu = { module = "org.tensorflow:tensorflow-lite-gpu", version.ref = "tensorflowLite" }
+tensorflow-tensorflow-lite-gpu = { module = "org.tensorflow:tensorflow-lite-gpu", version.ref = "tensorflowLiteGpu" }
+tensorflow-tensorflow-lite-gpu-api = { module = "org.tensorflow:tensorflow-lite-gpu-api", version.ref = "tensorflowLiteGpuApi" }
 
 
 [plugins]

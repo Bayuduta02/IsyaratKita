@@ -8,7 +8,6 @@ import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
-import org.tensorflow.lite.gpu.GpuDelegateFactory
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -26,7 +25,7 @@ class Model private constructor(
         private const val TAG = "Model"
         private const val MODEL_NAME = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
-        private const val CONF_THRESHOLD = 0.5f
+        private const val CONF_THRESHOLD = 0.3f
 
         fun newInstance(context: Context): Model {
             val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
@@ -178,41 +177,70 @@ class Model private constructor(
         floatBuffer.rewind()
         floatBuffer.get(scratchOutput)
 
-        val features = outputShape[1]
-        val boxes = outputShape[2]
-
         val results = ArrayList<DetectionResult>()
-        for (boxIndex in 0 until boxes) {
-            var bestScore = 0f
-            var bestClassIndex = -1
+        if (outputShape.size == 3 && outputShape[2] == 6) {
+            val maxDet = outputShape[1]
+            val stride = 6
 
-            for (classOffset in 4 until features) {
-                val score = scratchOutput[classOffset * boxes + boxIndex]
-                if (score > bestScore) {
-                    bestScore = score
-                    bestClassIndex = classOffset - 4
-                }
-            }
-            if (bestScore < CONF_THRESHOLD || bestClassIndex !in labels.indices) continue
+            for (index in 0 until maxDet) {
+                val base = index * stride
+                val left = max(0f, scratchOutput[base] * inputWidth)
+                val top = max(0f, scratchOutput[base + 1] * inputHeight)
+                val right = min(inputWidth.toFloat(), scratchOutput[base + 2] * inputWidth)
+                val bottom = min(inputHeight.toFloat(), scratchOutput[base + 3] * inputHeight)
+                val score = scratchOutput[base + 4]
+                val classIndex = scratchOutput[base + 5].toInt()
 
-            val xCenter = scratchOutput[0 * boxes + boxIndex] * inputWidth
-            val yCenter = scratchOutput[1 * boxes + boxIndex] * inputHeight
-            val width = scratchOutput[2 * boxes + boxIndex] * inputWidth
-            val height = scratchOutput[3 * boxes + boxIndex] * inputHeight
+                if (score < CONF_THRESHOLD || classIndex !in labels.indices) continue
 
-            val left = max(0f, xCenter - width / 2f)
-            val top = max(0f, yCenter - height / 2f)
-            val right = min(inputWidth.toFloat(), xCenter + width / 2f)
-            val bottom = min(inputHeight.toFloat(), yCenter + height / 2f)
-
-            results.add(
-                DetectionResult(
-                    classIndex = bestClassIndex,
-                    score = bestScore,
-                    boundingBox = floatArrayOf(left, top, right, bottom),
-                    label = labels[bestClassIndex]
+                results.add(
+                    DetectionResult(
+                        classIndex = classIndex,
+                        score = score,
+                        boundingBox = floatArrayOf(left, top, right, bottom),
+                        label = labels[classIndex]
+                    )
                 )
-            )
+            }
+        } else {
+            val boxes = outputShape[1]
+            val features = outputShape[2]
+            val classLimit = min(features, labels.size + 4)
+
+            for (boxIndex in 0 until boxes) {
+                var bestScore = 0f
+                var bestClassIndex = -1
+                val baseIndex = boxIndex * features
+
+                for (classOffset in 4 until classLimit) {
+                    val score = scratchOutput[baseIndex + classOffset]
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestClassIndex = classOffset - 4
+                    }
+                }
+
+                if (bestScore < CONF_THRESHOLD || bestClassIndex !in labels.indices) continue
+
+                val xCenter = scratchOutput[baseIndex] * inputWidth
+                val yCenter = scratchOutput[baseIndex + 1] * inputHeight
+                val width = scratchOutput[baseIndex + 2] * inputWidth
+                val height = scratchOutput[baseIndex + 3] * inputHeight
+
+                val left = max(0f, xCenter - width / 2f)
+                val top = max(0f, yCenter - height / 2f)
+                val right = min(inputWidth.toFloat(), xCenter + width / 2f)
+                val bottom = min(inputHeight.toFloat(), yCenter + height / 2f)
+
+                results.add(
+                    DetectionResult(
+                        classIndex = bestClassIndex,
+                        score = bestScore,
+                        boundingBox = floatArrayOf(left, top, right, bottom),
+                        label = labels[bestClassIndex]
+                    )
+                )
+            }
         }
         return results.sortedByDescending { it.score }
     }
