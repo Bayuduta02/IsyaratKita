@@ -57,12 +57,12 @@ class AutoFitSurfaceView @JvmOverloads constructor(
         } else {
 
             // Performs center-crop transformation of the camera frames
+            val actualRatio = if (width > height) aspectRatio else 1f / aspectRatio
             val newWidth: Int
             val newHeight: Int
-            val actualRatio = if (width > height) aspectRatio else 1f / aspectRatio
             if (width < height * actualRatio) {
-                newHeight = height
-                newWidth = (height * actualRatio).roundToInt()
+                newWidth = width
+                newHeight = (width / actualRatio).roundToInt()
             } else {
                 newWidth = width
                 newHeight = (width / actualRatio).roundToInt()

@@ -142,7 +142,6 @@ class KameraGestureActivity : AppCompatActivity() {
             modelBinding = YoloModelBinding(this)
             modelInputWidth = modelBinding?.inputWidth ?: modelInputWidth
             modelInputHeight = modelBinding?.inputHeight ?: modelInputHeight
-            overlayView.setModelInputSize(modelInputWidth, modelInputHeight)
             gestureText.text = "Model siap"
         } catch (e: Exception) {
             gestureText.text = "Error: ${e.message}"
@@ -167,7 +166,7 @@ class KameraGestureActivity : AppCompatActivity() {
             val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
             previewSize = getPreviewOutputSize(windowManager.defaultDisplay, characteristics, SurfaceHolder::class.java)
             surfaceView.setAspectRatio(previewSize.width, previewSize.height)
-
+            overlayView.setSourceInfo(previewSize.width, previewSize.height, !isBackCamera)
             // --- PERBAIKAN ---
             // ImageReader diset ke ukuran preview untuk menangkap gambar dengan kualitas lebih baik
             // Penskalaan akan dilakukan kemudian
@@ -231,19 +230,18 @@ class KameraGestureActivity : AppCompatActivity() {
                     previewHeight
                 )
 
-                val finalResults = mappedResults
+                val filteredResults = mappedResults
                     .filter { it.confidence >= MIN_CONFIDENCE }
                     .sortedByDescending { it.confidence }
-                    .take(1)
 
                 val totalProcessingTime = System.currentTimeMillis() - startTime
 
                 runOnUiThread {
-                    overlayView.setModelInputSize(previewWidth, previewHeight)
-                    overlayView.setResults(mappedResults)
+                    overlayView.setSourceInfo(previewWidth, previewHeight, !isBackCamera)
+                    overlayView.setResults(filteredResults)
 
-                    if (mappedResults.isNotEmpty()) {
-                        val topResult = mappedResults.first()
+                    val topResult = filteredResults.firstOrNull()
+                    if (topResult != null) {
                         gestureText.text = topResult.label.uppercase()
                         confidenceText.text = "Akurasi: ${String.format("%.1f", topResult.confidence * 100)}%"
                     } else {

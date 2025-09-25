@@ -9,6 +9,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
+import kotlin.math.max
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
@@ -19,8 +20,9 @@ class OverlayView @JvmOverloads constructor(
     private var detections: List<YoloModelBinding.Detection> = emptyList()
     private var viewWidth = 0
     private var viewHeight = 0
-    private var modelInputWidth = 640
-    private var modelInputHeight = 640
+    private var previewWidth = 0
+    private var previewHeight = 0
+    private var isFrontFacing = false
     @Suppress("unused")
     private val tag = "OverlayView"
 
@@ -51,12 +53,15 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
-    // Fungsi setPreviewSize tidak lagi begitu relevan karena kita menggunakan ukuran view
-    // tapi tidak apa-apa untuk tetap ada.
-    fun setModelInputSize(width: Int, height: Int) {
-        if (width > 0 && height > 0) {
-            modelInputWidth = width
-            modelInputHeight = height
+    fun setSourceInfo(width: Int, height: Int, frontFacing: Boolean) {
+        if (width <= 0 || height <= 0) return
+        val sourceChanged = previewWidth != width || previewHeight != height
+        val facingChanged = isFrontFacing != frontFacing
+
+        if (sourceChanged || facingChanged) {
+            previewWidth = width
+            previewHeight = height
+            isFrontFacing = frontFacing
             invalidate()
         }
     }
@@ -71,54 +76,74 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        if (detections.isEmpty() || viewWidth == 0 || viewHeight == 0) {
+        if (detections.isEmpty() || viewWidth == 0 || viewHeight == 0 || previewWidth == 0 || previewHeight == 0) {
             return
         }
 
-        // --- PERBAIKAN ---
-        // Logika penskalaan yang benar.
-        // Hasil deteksi (detections) memiliki koordinat dalam sistem 640x640 (ukuran input model).
-        // Kita perlu mengubahnya ke sistem koordinat View ini.
-        val scaleX = viewWidth.toFloat() / modelInputWidth.toFloat()
-        val scaleY = viewHeight.toFloat() / modelInputHeight.toFloat()
+        val scale = max(
+            viewWidth.toFloat() / previewWidth.toFloat(),
+            viewHeight.toFloat() / previewHeight.toFloat()
+        )
+        val scaledWidth = previewWidth * scale
+        val scaledHeight = previewHeight * scale
+        val dx = (viewWidth - scaledWidth) / 2f
+        val dy = (viewHeight - scaledHeight) / 2f
 
         for (detection in detections) {
-            // Mengalikan koordinat asli dengan faktor skala
-            val scaledBox = RectF(
-                detection.boundingBox.left * scaleX,
-                detection.boundingBox.top * scaleY,
-                detection.boundingBox.right * scaleX,
-                detection.boundingBox.bottom * scaleY
+            var left = detection.boundingBox.left * scale + dx
+            val top = detection.boundingBox.top * scale + dy
+            var right = detection.boundingBox.right * scale + dx
+            val bottom = detection.boundingBox.bottom * scale + dy
+
+
+            if (isFrontFacing) {
+                val mirroredLeft = viewWidth - right
+                val mirroredRight = viewWidth - left
+                left = mirroredLeft
+                right = mirroredRight
+            }
+
+            if (left > right) {
+                val temp = left
+                left = right
+                right = temp
+            }
+
+            val clippedRect = RectF(
+                left.coerceIn(0f, viewWidth.toFloat()),
+                top.coerceIn(0f, viewHeight.toFloat()),
+                right.coerceIn(0f, viewWidth.toFloat()),
+                bottom.coerceIn(0f, viewHeight.toFloat())
             )
 
-            // Menggambar bounding box
+            if (clippedRect.width() <= 0f || clippedRect.height() <= 0f) {
+                continue
+            }
             val boxColor = when {
                 detection.confidence > 0.8f -> Color.GREEN
                 detection.confidence > 0.6f -> Color.YELLOW
                 else -> Color.RED
             }
             boxPaint.color = boxColor
-            canvas.drawRoundRect(scaledBox, 16f, 16f, boxPaint) // Menggunakan drawRoundRect agar sudut lebih halus
+            canvas.drawRoundRect(clippedRect, 16f, 16f, boxPaint)
 
             // Menggambar label dan confidence
             val label = "${detection.label.uppercase()} ${String.format("%.0f", detection.confidence * 100)}%"
             val textBounds = Rect()
             textPaint.getTextBounds(label, 0, label.length, textBounds)
 
-            val textX = scaledBox.left + 10f
-            val textY = scaledBox.top + textBounds.height() + 10f
-
-            // Menggambar background untuk teks agar mudah dibaca
             val backgroundRect = RectF(
-                scaledBox.left,
-                scaledBox.top,
-                scaledBox.left + textBounds.width() + 20f,
-                scaledBox.top + textBounds.height() + 20f
+                clippedRect.left,
+                clippedRect.top,
+                clippedRect.left + textBounds.width() + 20f,
+                clippedRect.top + textBounds.height() + 20f,
             )
             textBackgroundPaint.color = Color.argb(180, 0, 0, 0)
             canvas.drawRoundRect(backgroundRect, 16f, 16f, textBackgroundPaint)
 
             // Menggambar teks
+            val textX = clippedRect.left + 10f
+            val textY = clippedRect.top + textBounds.height() + 10f
             canvas.drawText(label, textX, textY, textPaint)
         }
     }
