@@ -28,12 +28,29 @@ class Model private constructor(
         fun newInstance(context: Context): Model {
             val options = Interpreter.Options().apply {
                 setNumThreads(4)
-                val compatList = CompatibilityList()
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    addDelegate(GpuDelegate())
-                    Log.d(TAG, "GPU Delegate is enabled.")
-                } else {
-                    Log.d(TAG, "GPU Delegate is not supported, using CPU.")
+
+                // Coba gunakan NNAPI terlebih dahulu (Android Neural Networks API)
+                try {
+                    val nnApiDelegate = org.tensorflow.lite.nnapi.NnApiDelegate()
+                    addDelegate(nnApiDelegate)
+                    Log.d(TAG, "NNAPI Delegate is enabled.")
+                } catch (e: Exception) {
+                    Log.d(TAG, "NNAPI Delegate tidak tersedia: ${e.message}")
+
+                    // Fallback ke GPU jika NNAPI tidak tersedia
+                    val compatList = CompatibilityList()
+                    if (compatList.isDelegateSupportedOnThisDevice) {
+                        try {
+                            val gpuDelegate = GpuDelegate()
+                            addDelegate(gpuDelegate)
+                            Log.d(TAG, "GPU Delegate is enabled.")
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Error saat menggunakan GPU Delegate: ${e.message}")
+                            Log.d(TAG, "Fallback ke CPU.")
+                        }
+                    } else {
+                        Log.d(TAG, "GPU Delegate is not supported, using CPU.")
+                    }
                 }
             }
 
@@ -43,7 +60,17 @@ class Model private constructor(
                 val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
                 return Model(interpreter, labels)
             } catch (e: Exception) {
-                throw RuntimeException("Error initializing TFLite Model: ${e.message}")
+                val errorMessage = when {
+                    e.message?.contains("Could not find") == true ->
+                        "Model file tidak ditemukan. Pastikan file $MODEL_NAME ada di folder assets."
+                    e.message?.contains("Error loading model") == true ->
+                        "Error saat memuat model. Model mungkin rusak atau tidak kompatibel."
+                    e.message?.contains("labels") == true || e.message?.contains("LABELS") == true ->
+                        "File label tidak ditemukan. Pastikan file $LABELS_FILE ada di folder assets."
+                    else -> "Error initializing TFLite Model: ${e.message}"
+                }
+                Log.e(TAG, errorMessage, e)
+                throw RuntimeException(errorMessage)
             }
         }
     }

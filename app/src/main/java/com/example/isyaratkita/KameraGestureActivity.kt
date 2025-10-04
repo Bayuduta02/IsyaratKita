@@ -132,11 +132,27 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private fun initializeModel() {
         try {
+            // Periksa keberadaan file model dan label terlebih dahulu
+            val assetManager = assets
+            val modelExists = assetManager.list("")?.contains("model.tflite") ?: false
+            val labelsExists = assetManager.list("")?.contains("labels.txt") ?: false
+
+            if (!modelExists || !labelsExists) {
+                val errorMsg = when {
+                    !modelExists && !labelsExists -> "File model.tflite dan labels.txt tidak ditemukan"
+                    !modelExists -> "File model.tflite tidak ditemukan"
+                    else -> "File labels.txt tidak ditemukan"
+                }
+                throw Exception(errorMsg)
+            }
+
             yuvToRgbConverter = YuvToRgbConverter(this)
             modelBinding = YoloModelBinding(this)
             gestureText.text = "Model siap"
         } catch (e: Exception) {
             gestureText.text = "Error: ${e.message}"
+            Log.e(TAG, "Error initializing model: ${e.message}", e)
+            Toast.makeText(this, "Gagal memuat model: ${e.message}", Toast.LENGTH_LONG).show()
             e.printStackTrace()
         }
     }
