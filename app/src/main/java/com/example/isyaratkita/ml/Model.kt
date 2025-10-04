@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -22,9 +23,7 @@ class Model private constructor(
         private const val LABELS_FILE = "labels.txt"
 
         // Parameter ini sesuai dengan metadata.yaml Anda
-        private const val INPUT_SIZE = 640
-        private const val NUM_CHANNELS = 3
-        private const val CONF_THRESHOLD = 0.50f // Anda bisa sesuaikan threshold ini jika perlu
+        private const val CONF_THRESHOLD = 0.30f // Anda bisa sesuaikan threshold ini jika perlu
 
         fun newInstance(context: Context): Model {
             val options = Interpreter.Options().apply {
@@ -100,19 +99,114 @@ class Model private constructor(
      * Data piksel (0-255) langsung dimasukkan sebagai Byte.
      */
     private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
-        // Bitmap yang masuk diasumsikan sudah berukuran INPUT_SIZE x INPUT_SIZE
-        // Alokasi buffer untuk Byte (1 byte per channel), bukan Float (4 bytes).
-        val inputBuffer = ByteBuffer.allocateDirect(1 * NUM_CHANNELS * INPUT_SIZE * INPUT_SIZE)
+        val inputTensor = interpreter.getInputTensor(0)
+        val inputShape = inputTensor.shape()
+        val inputDataType = inputTensor.dataType()
+
+        if (inputShape.size != 4) {
+            throw IllegalStateException("Expected input tensor to have 4 dimensions but was: ${inputShape.toList()}")
+        }
+
+        val height: Int
+        val width: Int
+        val channels: Int
+        val isChannelLast: Boolean
+
+        when {
+            inputShape[3] == 3 -> {
+                height = inputShape[1]
+                width = inputShape[2]
+                channels = inputShape[3]
+                isChannelLast = true
+            }
+
+            inputShape[1] == 3 -> {
+                height = inputShape[2]
+                width = inputShape[3]
+                channels = inputShape[1]
+                isChannelLast = false
+            }
+
+            else -> throw IllegalStateException("Unsupported input tensor shape: ${inputShape.toList()}")
+        }
+
+        val inputBuffer = ByteBuffer.allocateDirect(inputTensor.numBytes())
             .order(ByteOrder.nativeOrder())
 
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        val scaledBitmap = if (bitmap.width != width || bitmap.height != height) {
+            Bitmap.createScaledBitmap(bitmap, width, height, true)
+        } else {
+            bitmap
+        }
 
-        for (pixel in pixels) {
-            // Ekstrak channel warna dan masukan sebagai Byte
-            inputBuffer.put(((pixel shr 16) and 0xFF).toByte()) // R
-            inputBuffer.put(((pixel shr 8) and 0xFF).toByte())  // G
-            inputBuffer.put((pixel and 0xFF).toByte())          // B
+        val pixelCount = width * height
+        val pixels = IntArray(pixelCount)
+        scaledBitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        if (scaledBitmap !== bitmap) {
+            scaledBitmap.recycle()
+        }
+
+        when (inputDataType) {
+            DataType.UINT8 -> {
+                if (channels != 3) {
+                    throw IllegalStateException("Unsupported channel count for UINT8 input: $channels")
+                }
+
+                if (isChannelLast) {
+                    for (pixel in pixels) {
+                        inputBuffer.put(((pixel shr 16) and 0xFF).toByte()) // R
+                        inputBuffer.put(((pixel shr 8) and 0xFF).toByte())  // G
+                        inputBuffer.put((pixel and 0xFF).toByte())          // B
+                    }
+                } else {
+                    for (channel in 0 until channels) {
+                        for (i in 0 until pixelCount) {
+                            val pixel = pixels[i]
+                            val component = when (channel) {
+                                0 -> (pixel shr 16) and 0xFF
+                                1 -> (pixel shr 8) and 0xFF
+                                2 -> pixel and 0xFF
+                                else -> 0
+                            }
+                            inputBuffer.put(component.toByte())
+                        }
+                    }
+                }
+            }
+
+            DataType.FLOAT32 -> {
+                val floatBuffer = inputBuffer.asFloatBuffer()
+                if (channels != 3) {
+                    throw IllegalStateException("Unsupported channel count for FLOAT32 input: $channels")
+                }
+
+                if (isChannelLast) {
+                    for (pixel in pixels) {
+                        floatBuffer.put(((pixel shr 16) and 0xFF) / 255f)
+                        floatBuffer.put(((pixel shr 8) and 0xFF) / 255f)
+                        floatBuffer.put((pixel and 0xFF) / 255f)
+                    }
+                } else {
+                    for (channel in 0 until channels) {
+                        for (i in 0 until pixelCount) {
+                            val pixel = pixels[i]
+                            val component = when (channel) {
+                                0 -> (pixel shr 16) and 0xFF
+                                1 -> (pixel shr 8) and 0xFF
+                                2 -> pixel and 0xFF
+                                else -> 0
+                            }
+                            floatBuffer.put(component / 255f)
+                        }
+                    }
+                }
+                floatBuffer.rewind()
+            }
+
+            else -> {
+                // Tidak mungkin terjadi karena kasus lain ditangani di when sebelumnya
+            }
         }
 
         inputBuffer.rewind()
@@ -127,6 +221,24 @@ class Model private constructor(
         outputBuffer: ByteBuffer,
         outputShape: IntArray
     ): List<DetectionResult> {
+        val inputShape = interpreter.getInputTensor(0).shape()
+        if (inputShape.size != 4) {
+            throw IllegalStateException("Expected input tensor to have 4 dimensions but was: ${inputShape.toList()}")
+        }
+
+        val inputHeight: Float
+        val inputWidth: Float
+
+        if (inputShape[3] == 3) {
+            inputHeight = inputShape[1].toFloat()
+            inputWidth = inputShape[2].toFloat()
+        } else if (inputShape[1] == 3) {
+            inputHeight = inputShape[2].toFloat()
+            inputWidth = inputShape[3].toFloat()
+        } else {
+            throw IllegalStateException("Unsupported input tensor shape: ${inputShape.toList()}")
+        }
+
         val numBoxes = outputShape[2]
         val floatBuffer = outputBuffer.asFloatBuffer()
 
@@ -157,10 +269,10 @@ class Model private constructor(
 
                 // Konversi dari [center_x, center_y, width, height] ke [x1, y1, x2, y2]
                 // dalam koordinat piksel (relatif ke INPUT_SIZE)
-                val xCenter = box[0] * INPUT_SIZE
-                val yCenter = box[1] * INPUT_SIZE
-                val w = box[2] * INPUT_SIZE
-                val h = box[3] * INPUT_SIZE
+                val xCenter = box[0] * inputWidth
+                val yCenter = box[1] * inputHeight
+                val w = box[2] * inputWidth
+                val h = box[3] * inputHeight
 
                 val x1 = xCenter - w / 2
                 val y1 = yCenter - h / 2

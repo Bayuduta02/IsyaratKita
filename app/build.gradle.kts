@@ -39,7 +39,7 @@ android {
         jvmTarget = "11"
     }
     buildFeatures {
-        mlModelBinding = true
+
     }
     androidResources {
         noCompress += "tflite"
