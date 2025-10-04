@@ -140,11 +140,25 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             yuvToRgbConverter = YuvToRgbConverter(this)
             modelBinding = YoloModelBinding(this)
-            modelInputWidth = modelBinding?.inputWidth ?: modelInputWidth
-            modelInputHeight = modelBinding?.inputHeight ?: modelInputHeight
-            gestureText.text = "Model siap"
+
+            if (modelBinding?.isModelLoaded == true) {
+                modelInputWidth = modelBinding?.inputWidth ?: modelInputWidth
+                modelInputHeight = modelBinding?.inputHeight ?: modelInputHeight
+                gestureText.text = "Model siap"
+                Toast.makeText(this, "Model loaded successfully", Toast.LENGTH_SHORT).show()
+                Log.i(TAG, "Model initialized: ${modelInputWidth}x${modelInputHeight}, Labels: ${modelBinding?.labels?.size}")
+            } else {
+                val errorMsg = modelBinding?.errorMessage ?: "Unknown error loading model"
+                gestureText.text = "Model Error"
+                confidenceText.text = "Tidak dapat memuat model"
+                Toast.makeText(this, errorMsg, Toast.LENGTH_LONG).show()
+                Log.e(TAG, "Model initialization failed: $errorMsg")
+            }
         } catch (e: Exception) {
-            gestureText.text = "Error: ${e.message}"
+            val errorMsg = "Error: ${e.message}"
+            gestureText.text = errorMsg
+            confidenceText.text = "Tidak dapat memuat model"
+            Toast.makeText(this, errorMsg, Toast.LENGTH_LONG).show()
             e.printStackTrace()
         }
     }
@@ -222,6 +236,14 @@ class KameraGestureActivity : AppCompatActivity() {
             previewBitmap.recycle()
 
             modelBinding?.let { model ->
+                if (!model.isModelLoaded) {
+                    runOnUiThread {
+                        gestureText.text = "Model Error"
+                        confidenceText.text = model.errorMessage ?: "Model tidak tersedia"
+                    }
+                    return@let
+                }
+
                 val (rawResults, inferenceTime) = model.detect(letterboxResult.bitmap)
                 val mappedResults = mapDetectionsToPreview(
                     rawResults,

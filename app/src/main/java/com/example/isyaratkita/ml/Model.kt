@@ -28,8 +28,26 @@ class Model private constructor(
         private const val CONF_THRESHOLD = 0.3f
 
         fun newInstance(context: Context): Model {
-            val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
-            val labels = FileUtil.loadLabels(context, LABELS_FILE)
+            Log.d(TAG, "Loading model: $MODEL_NAME")
+            val modelBuffer = try {
+                FileUtil.loadMappedFile(context, MODEL_NAME)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load model file: $MODEL_NAME", e)
+                throw IllegalStateException("Model file '$MODEL_NAME' not found or corrupted. Please add a valid TFLite model to assets folder.", e)
+            }
+
+            Log.d(TAG, "Model buffer loaded: ${modelBuffer.capacity()} bytes")
+            if (modelBuffer.capacity() < 100) {
+                throw IllegalStateException("Model file is too small (${modelBuffer.capacity()} bytes). It appears to be a placeholder or corrupted.")
+            }
+
+            val labels = try {
+                FileUtil.loadLabels(context, LABELS_FILE)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load labels file: $LABELS_FILE", e)
+                throw IllegalStateException("Labels file '$LABELS_FILE' not found.", e)
+            }
+            Log.d(TAG, "Loaded ${labels.size} labels: ${labels.take(5).joinToString(", ")}...")
 
             var gpuDelegate: GpuDelegate? = null
             val compatList = CompatibilityList()
@@ -52,7 +70,7 @@ class Model private constructor(
                 }
                 Interpreter(modelBuffer, options)
             } catch (interpreterError: Exception) {
-                Log.w(TAG, "Falling back to CPU interpreter: ${interpreterError.message}")
+                Log.w(TAG, "Falling back to CPU interpreter: ${interpreterError.message}", interpreterError)
                 gpuDelegate?.close()
                 gpuDelegate = null
 
@@ -63,7 +81,11 @@ class Model private constructor(
                 }
                 Interpreter(modelBuffer, cpuOptions)
             }
-            return Model(interpreter, gpuDelegate, labels)
+
+            Log.d(TAG, "Interpreter created successfully")
+            val model = Model(interpreter, gpuDelegate, labels)
+            Log.d(TAG, "Model initialized: Input=${model.inputWidth}x${model.inputHeight}, Output shape=${model.outputShape.contentToString()}")
+            return model
         }
     }
 
@@ -95,6 +117,7 @@ class Model private constructor(
     private val scratchOutput = FloatArray(outputTensor.numElements())
 
     init {
+        Log.d(TAG, "Input tensor shape: ${inputShape.contentToString()}")
         require(inputShape.size == 4) { "Unsupported input tensor shape: ${inputShape.contentToString()}" }
 
         val (heightIndex, widthIndex, channelsIndex) = if (inputShape[3] == 3) {
