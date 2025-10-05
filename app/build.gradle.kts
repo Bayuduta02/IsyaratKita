@@ -5,21 +5,17 @@ plugins {
 
 android {
     namespace = "com.example.isyaratkita"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.isyaratkita"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        
-        // Mengabaikan peringatan alignment untuk library native TensorFlow
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-        }
+
     }
 
     buildTypes {
@@ -39,16 +35,18 @@ android {
         jvmTarget = "11"
     }
     buildFeatures {
-
+    }
+    aaptOptions {
+        noCompress += "tflite"
     }
     androidResources {
         noCompress += "tflite"
     }
-    
+
     // Mengabaikan peringatan alignment untuk library native
     packagingOptions {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
         resources {
             excludes += listOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/LICENSE.txt", "META-INF/license.txt", "META-INF/NOTICE", "META-INF/NOTICE.txt", "META-INF/notice.txt", "META-INF/ASL2.0")
@@ -57,13 +55,12 @@ android {
 }
 
 dependencies {
-    // TensorFlow Lite
-    implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.gpu)
-    implementation(libs.tensorflow.lite.support)
-    implementation(libs.tensorflow.lite.metadata)
-    implementation("org.tensorflow:tensorflow-lite-gpu-delegate-plugin:0.4.4")
-    
+
+    implementation(libs.litert.metadata)
+    implementation(libs.litert.main)
+    implementation(libs.litert.support)
+    implementation(libs.litert.gpu)
+
     implementation(libs.androidx.viewpager2)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.core.ktx)
@@ -75,7 +72,7 @@ dependencies {
     implementation(libs.androidx.camera.extensions)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.core)
-    implementation(libs.androidx.room.external.antlr)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

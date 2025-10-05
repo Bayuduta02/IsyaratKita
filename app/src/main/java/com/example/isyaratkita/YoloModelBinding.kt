@@ -73,9 +73,6 @@ class YoloModelBinding(private val context: Context) {
         }
     }
 
-    // --- PERBAIKAN ---
-    // Fungsi applyNMS() dan calculateIoU() DIHAPUS karena tidak diperlukan lagi.
-
     fun close() {
         model?.close()
         model = null

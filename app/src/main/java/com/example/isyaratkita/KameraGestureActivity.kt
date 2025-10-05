@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageFormat
+import android.graphics.RectF
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -14,11 +15,9 @@ import android.media.ImageReader
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.util.DisplayMetrics
 import android.util.Log
 import android.util.Size
 import android.view.SurfaceHolder
-import android.view.View
 import android.view.WindowManager
 import android.widget.ImageButton
 import android.widget.TextView
@@ -26,6 +25,9 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.isyaratkita.utils.AutoFitSurfaceView
 import com.example.isyaratkita.utils.CameraSizes.getPreviewOutputSize
 import com.example.isyaratkita.utils.YuvToRgbConverter
@@ -63,7 +65,7 @@ class KameraGestureActivity : AppCompatActivity() {
     private var currentFps = 0f
 
     private var frameSkipCounter = 0
-    private val FRAME_SKIP_RATE = 2 // Proses setiap 3 frame, bisa disesuaikan
+    private val FRAME_SKIP_RATE = 2
 
     private val cameraManager: CameraManager by lazy {
         getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -72,10 +74,8 @@ class KameraGestureActivity : AppCompatActivity() {
     private var currentCameraId: String = ""
     private var isBackCamera: Boolean = true
 
-    // --- PERBAIKAN ---
-    // Menggunakan konstanta dari Model.kt sebagai satu-satunya sumber kebenaran
-    // untuk ukuran input model.
-    private val modelInputSize = 640
+    // PERBAIKAN: Gunakan 320 sesuai model.tflite Anda
+    private val modelInputSize = 320
 
     companion object {
         private const val TAG = "KameraGestureActivity"
@@ -84,17 +84,27 @@ class KameraGestureActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+
+        // PERBAIKAN: Gunakan WindowInsetsController modern
+        setupImmersiveMode()
 
         setContentView(R.layout.camera_activity)
         initViews()
         setupClickListeners()
         setupSurfaceView()
         initializeModel()
+    }
+
+    // PERBAIKAN: Setup immersive mode dengan API modern
+    private fun setupImmersiveMode() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
     }
 
     private fun initViews() {
@@ -119,12 +129,17 @@ class KameraGestureActivity : AppCompatActivity() {
     private fun setupSurfaceView() {
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
+                Log.d(TAG, "surfaceCreated")
                 checkCameraPermissionAndOpen()
             }
+
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                Log.d(TAG, "surfaceChanged: ${width}x${height}")
                 overlayView.setPreviewSize(width, height)
             }
+
             override fun surfaceDestroyed(holder: SurfaceHolder) {
+                Log.d(TAG, "surfaceDestroyed")
                 closeCamera()
             }
         })
@@ -132,7 +147,6 @@ class KameraGestureActivity : AppCompatActivity() {
 
     private fun initializeModel() {
         try {
-            // Periksa keberadaan file model dan label terlebih dahulu
             val assetManager = assets
             val modelExists = assetManager.list("")?.contains("model.tflite") ?: false
             val labelsExists = assetManager.list("")?.contains("labels.txt") ?: false
@@ -149,11 +163,11 @@ class KameraGestureActivity : AppCompatActivity() {
             yuvToRgbConverter = YuvToRgbConverter(this)
             modelBinding = YoloModelBinding(this)
             gestureText.text = "Model siap"
+            Log.i(TAG, "Model initialized successfully")
         } catch (e: Exception) {
             gestureText.text = "Error: ${e.message}"
             Log.e(TAG, "Error initializing model: ${e.message}", e)
             Toast.makeText(this, "Gagal memuat model: ${e.message}", Toast.LENGTH_LONG).show()
-            e.printStackTrace()
         }
     }
 
@@ -172,13 +186,24 @@ class KameraGestureActivity : AppCompatActivity() {
             }
 
             val characteristics = cameraManager.getCameraCharacteristics(currentCameraId)
-            previewSize = getPreviewOutputSize(windowManager.defaultDisplay, characteristics, SurfaceHolder::class.java)
-            surfaceView.setAspectRatio(previewSize.width, previewSize.height)
+            previewSize = getPreviewOutputSize(
+                windowManager.defaultDisplay,
+                characteristics,
+                SurfaceHolder::class.java
+            )
 
-            // --- PERBAIKAN ---
-            // ImageReader diset ke ukuran preview untuk menangkap gambar dengan kualitas lebih baik
-            // Penskalaan akan dilakukan kemudian
-            imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 3)
+            // PERBAIKAN: Pastikan aspect ratio selalu di-set
+            surfaceView.post {
+                surfaceView.setAspectRatio(previewSize.width, previewSize.height)
+                Log.d(TAG, "Preview size set: ${previewSize.width}x${previewSize.height}")
+            }
+
+            imageReader = ImageReader.newInstance(
+                previewSize.width,
+                previewSize.height,
+                ImageFormat.YUV_420_888,
+                3
+            )
 
             imageReader.setOnImageAvailableListener({ reader ->
                 val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
@@ -194,67 +219,93 @@ class KameraGestureActivity : AppCompatActivity() {
                 }
             }, backgroundHandler)
 
-            startBackgroundThread()
             cameraManager.openCamera(currentCameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     cameraOpenCloseLock.release()
                     cameraDevice = camera
                     createCameraPreviewSession()
+                    Log.i(TAG, "Camera opened successfully")
                 }
+
                 override fun onDisconnected(camera: CameraDevice) {
                     cameraOpenCloseLock.release()
                     camera.close()
+                    Log.w(TAG, "Camera disconnected")
                 }
+
                 override fun onError(camera: CameraDevice, error: Int) {
                     cameraOpenCloseLock.release()
                     camera.close()
+                    Log.e(TAG, "Camera error: $error")
                     finish()
                 }
             }, backgroundHandler)
         } catch (e: Exception) {
-            Log.e(TAG, "Error opening camera: ${e.message}")
+            Log.e(TAG, "Error opening camera: ${e.message}", e)
+            cameraOpenCloseLock.release()
         }
     }
 
-    // --- PERBAIKAN ---
-    // Logika proses gambar disederhanakan dan penskalaan yang salah dihapus.
     private fun processImage(image: android.media.Image) {
         try {
             val startTime = System.currentTimeMillis()
+
+            // Convert YUV to RGB
             val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(image, bitmap)
 
-            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, modelInputSize, modelInputSize, true)
-            bitmap.recycle() // Recycle bitmap asli setelah di-scaling
+            // Scale to model input size (320x320)
+            val scaledBitmap = Bitmap.createScaledBitmap(
+                bitmap,
+                modelInputSize,
+                modelInputSize,
+                true
+            )
+            bitmap.recycle()
 
             modelBinding?.let { model ->
                 val (results, inferenceTime) = model.detect(scaledBitmap)
 
-                // Logika penskalaan yang salah di sini DIHAPUS.
-                // 'results' sekarang berisi koordinat relatif terhadap gambar 640x640.
-                // Biarkan OverlayView yang menangani penskalaan ke layar.
+                // PERBAIKAN: Scale coordinates dari model space (320x320) ke preview space
+                // Detection.boundingBox adalah RectF dalam koordinat 320x320
+                val scaleX = previewSize.width.toFloat() / modelInputSize
+                val scaleY = previewSize.height.toFloat() / modelInputSize
+
+                val scaledResults = results.map { detection ->
+                    YoloModelBinding.Detection(
+                        boundingBox = RectF(
+                            detection.boundingBox.left * scaleX,
+                            detection.boundingBox.top * scaleY,
+                            detection.boundingBox.right * scaleX,
+                            detection.boundingBox.bottom * scaleY
+                        ),
+                        label = detection.label,
+                        confidence = detection.confidence
+                    )
+                }
 
                 val totalProcessingTime = System.currentTimeMillis() - startTime
 
                 runOnUiThread {
-                    // Kirim 'results' yang asli langsung ke OverlayView
-                    overlayView.setResults(results)
+                    overlayView.setResults(scaledResults)
 
-                    if (results.isNotEmpty()) {
-                        val topResult = results.first()
+                    if (scaledResults.isNotEmpty()) {
+                        val topResult = scaledResults.first()
                         gestureText.text = topResult.label.uppercase()
                         confidenceText.text = "Akurasi: ${String.format("%.1f", topResult.confidence * 100)}%"
                     } else {
                         gestureText.text = "Mendeteksi..."
                         confidenceText.text = "Akurasi: --"
                     }
+
                     updateFps()
                     fpsText.text = "FPS: ${String.format("%.1f", currentFps)} | ${totalProcessingTime}ms"
                 }
             }
+
             scaledBitmap.recycle()
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing image: ${e.message}")
+            Log.e(TAG, "Error processing image: ${e.message}", e)
         } finally {
             image.close()
             isProcessingFrame.set(false)
@@ -265,43 +316,62 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             val surface = surfaceView.holder.surface
             val imageReaderSurface = imageReader.surface
+
             previewRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             previewRequestBuilder.addTarget(surface)
             previewRequestBuilder.addTarget(imageReaderSurface)
 
-            cameraDevice.createCaptureSession(listOf(surface, imageReaderSurface),
+            cameraDevice.createCaptureSession(
+                listOf(surface, imageReaderSurface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         cameraCaptureSession = session
                         updatePreview()
+                        Log.i(TAG, "Camera preview session configured")
                     }
+
                     override fun onConfigureFailed(session: CameraCaptureSession) {
-                        Toast.makeText(this@KameraGestureActivity, "Camera preview failed", Toast.LENGTH_SHORT).show()
+                        Log.e(TAG, "Camera preview session configuration failed")
+                        Toast.makeText(
+                            this@KameraGestureActivity,
+                            "Camera preview failed",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
-                }, backgroundHandler)
+                },
+                backgroundHandler
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error creating preview session: ${e.message}", e)
         }
     }
 
     private fun updatePreview() {
         try {
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            previewRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            cameraCaptureSession.setRepeatingRequest(previewRequestBuilder.build(), null, backgroundHandler)
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            )
+            previewRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_MODE,
+                CaptureRequest.CONTROL_AE_MODE_ON
+            )
+            cameraCaptureSession.setRepeatingRequest(
+                previewRequestBuilder.build(),
+                null,
+                backgroundHandler
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error updating preview: ${e.message}", e)
         }
     }
 
-    // Fungsi lifecycle lainnya (onResume, onPause, dll) tidak diubah
-    // ... (sisa kode seperti onRequestPermissionsResult, start/stopBackgroundThread, dll.)
-    // ... Anda bisa menyalin sisa kode dari file asli Anda.
     private fun startBackgroundThread() {
         backgroundThread = HandlerThread("CameraBackground").also { it.start() }
         backgroundHandler = Handler(backgroundThread?.looper!!)
         inferenceThread = HandlerThread("InferenceThread", Thread.MAX_PRIORITY).also { it.start() }
         inferenceHandler = Handler(inferenceThread?.looper!!)
+        Log.d(TAG, "Background threads started")
     }
 
     private fun stopBackgroundThread() {
@@ -314,19 +384,27 @@ class KameraGestureActivity : AppCompatActivity() {
             inferenceThread = null
             backgroundHandler = null
             inferenceHandler = null
+            Log.d(TAG, "Background threads stopped")
         } catch (e: InterruptedException) {
-            e.printStackTrace()
+            Log.e(TAG, "Error stopping background threads", e)
         }
     }
 
     private fun closeCamera() {
         try {
             cameraOpenCloseLock.acquire()
-            if (::cameraCaptureSession.isInitialized) cameraCaptureSession.close()
-            if (::cameraDevice.isInitialized) cameraDevice.close()
-            if (::imageReader.isInitialized) imageReader.close()
+            if (::cameraCaptureSession.isInitialized) {
+                cameraCaptureSession.close()
+            }
+            if (::cameraDevice.isInitialized) {
+                cameraDevice.close()
+            }
+            if (::imageReader.isInitialized) {
+                imageReader.close()
+            }
+            Log.d(TAG, "Camera closed")
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error closing camera", e)
         } finally {
             cameraOpenCloseLock.release()
         }
@@ -334,21 +412,27 @@ class KameraGestureActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // PERBAIKAN: Re-apply immersive mode setiap onResume
+        setupImmersiveMode()
         startBackgroundThread()
+
         if (surfaceView.holder.surface.isValid) {
             checkCameraPermissionAndOpen()
         }
+        Log.d(TAG, "onResume")
     }
 
     override fun onPause() {
         closeCamera()
         stopBackgroundThread()
         super.onPause()
+        Log.d(TAG, "onPause")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         modelBinding?.close()
+        Log.d(TAG, "onDestroy")
     }
 
     override fun onRequestPermissionsResult(
@@ -370,9 +454,11 @@ class KameraGestureActivity : AppCompatActivity() {
     private fun checkCameraPermissionAndOpen() {
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this,
+            ActivityCompat.requestPermissions(
+                this,
                 arrayOf(android.Manifest.permission.CAMERA),
-                CAMERA_REQUEST_CODE)
+                CAMERA_REQUEST_CODE
+            )
         } else {
             openCamera()
         }
