@@ -23,21 +23,24 @@ class Model private constructor(
         private const val TAG = "Model"
         private const val MODEL_NAME = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
-        private const val CONF_THRESHOLD = 0.35f
+        // Model: YOLOv8 int8, 320x320, NMS=false (manual NMS required)
+        private const val CONF_THRESHOLD = 0.25f
         private const val IOU_THRESHOLD = 0.45f
 
         fun newInstance(context: Context): Model {
             val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
 
-            // Validasi ukuran model
+            // Validasi ukuran model (expected: ~3MB for int8 quantized)
             if (modelBuffer.capacity() < 1000) {
                 throw RuntimeException("File model.tflite terlalu kecil (${modelBuffer.capacity()} bytes). " +
-                        "Model YOLO yang valid biasanya 5-20 MB. Pastikan Anda sudah meng-upload model yang benar ke assets/model.tflite")
+                        "Expected: ~3MB (3000KB). Pastikan file model sudah benar di assets/model.tflite")
             }
+
+            Log.i(TAG, "✓ Model loaded: ${modelBuffer.capacity() / 1024}KB")
 
             val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
 
-            // Untuk model int8 quantized 320x320, gunakan XNNPACK
+            // int8 quantized model - CPU dengan XNNPACK optimal
             val baseOptions = Interpreter.Options().apply {
                 setNumThreads(Runtime.getRuntime().availableProcessors().coerceAtMost(4))
                 setUseXNNPACK(true)
@@ -261,16 +264,24 @@ class Model private constructor(
 
     /**
      * Postprocessing dengan NMS (karena metadata nms: false)
-     * Output format YOLOv8: [1, 84, 8400] => [batch, (4 bbox + 80 classes), anchors]
-     * Untuk 26 classes: [1, 30, 8400] => [batch, (4 bbox + 26 classes), anchors]
-     * Untuk 320x320: anchors sekitar 2100 (80x80/4 + 40x40/4 + 20x20/4)
+     *
+     * Output format YOLOv8:
+     * - 640x640: [1, 30, 8400] => (4 bbox + 26 classes), 8400 anchors
+     * - 320x320: [1, 30, 2100] => (4 bbox + 26 classes), 2100 anchors
+     *
+     * Bbox format: [x_center, y_center, width, height] dalam normalized coords [0-1]
      */
     private fun postprocessDetections(outputBuffer: ByteBuffer): List<DetectionResult> {
         val numBoxes = outputShape[2]
         val numClasses = outputShape[1] - 4 // 26 classes untuk A-Z
         val floatBuffer = outputBuffer.asFloatBuffer()
 
-        Log.d(TAG, "Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> numClasses=$numClasses, numBoxes=$numBoxes")
+        Log.i(TAG, "\u2192 Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> ${numClasses} classes, ${numBoxes} boxes")
+
+        // Validasi output shape
+        if (numClasses != 26) {
+            Log.w(TAG, "\u26a0\ufe0f Expected 26 classes, got $numClasses. Check model labels!")
+        }
 
         val candidates = mutableListOf<DetectionResult>()
 
