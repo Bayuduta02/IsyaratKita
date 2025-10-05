@@ -28,6 +28,13 @@ class Model private constructor(
 
         fun newInstance(context: Context): Model {
             val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
+
+            // Validasi ukuran model
+            if (modelBuffer.capacity() < 1000) {
+                throw RuntimeException("File model.tflite terlalu kecil (${modelBuffer.capacity()} bytes). " +
+                        "Model YOLO yang valid biasanya 5-20 MB. Pastikan Anda sudah meng-upload model yang benar ke assets/model.tflite")
+            }
+
             val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
 
             // Untuk model int8 quantized 320x320, gunakan XNNPACK
@@ -263,6 +270,8 @@ class Model private constructor(
         val numClasses = outputShape[1] - 4 // 26 classes untuk A-Z
         val floatBuffer = outputBuffer.asFloatBuffer()
 
+        Log.d(TAG, "Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> numClasses=$numClasses, numBoxes=$numBoxes")
+
         val candidates = mutableListOf<DetectionResult>()
 
         val inputHeightF = inputHeight.toFloat()
@@ -291,6 +300,7 @@ class Model private constructor(
             // Filter by confidence
             if (maxScore >= CONF_THRESHOLD && classIndex in labels.indices) {
                 // Convert to pixel coordinates [x1, y1, x2, y2]
+                // Koordinat dari model kemungkinan sudah normalized [0-1] atau dalam pixel
                 val xCenter = x * inputWidthF
                 val yCenter = y * inputHeightF
                 val width = w * inputWidthF
@@ -300,6 +310,10 @@ class Model private constructor(
                 val y1 = yCenter - height / 2
                 val x2 = xCenter + width / 2
                 val y2 = yCenter + height / 2
+
+                if (candidates.isEmpty()) {
+                    Log.d(TAG, "First detection: x=$x, y=$y, w=$w, h=$h -> x1=$x1, y1=$y1, x2=$x2, y2=$y2, score=$maxScore, class=${labels[classIndex]}")
+                }
 
                 candidates.add(
                     DetectionResult(
@@ -312,12 +326,20 @@ class Model private constructor(
             }
         }
 
+        Log.d(TAG, "Candidates found: ${candidates.size} (before NMS)")
+
         // Apply NMS
-        return if (candidates.size > 1) {
+        val finalResults = if (candidates.size > 1) {
             applyNMS(candidates)
         } else {
             candidates
         }
+
+        if (finalResults.isEmpty() && candidates.isEmpty()) {
+            Log.d(TAG, "⚠️ No detections above confidence threshold ($CONF_THRESHOLD)")
+        }
+
+        return finalResults
     }
 
     /**
