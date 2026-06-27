@@ -35,6 +35,7 @@ android {
         jvmTarget = "11"
     }
     buildFeatures {
+        mlModelBinding = true
     }
     aaptOptions {
         noCompress += "tflite"
@@ -72,6 +73,8 @@ dependencies {
     implementation(libs.androidx.camera.extensions)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.core)
+    implementation(libs.tensorflow.lite.support)
+    implementation(libs.tensorflow.lite.metadata)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

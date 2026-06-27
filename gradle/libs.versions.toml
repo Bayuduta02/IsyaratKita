@@ -10,7 +10,7 @@ espressoCore = "3.7.0"
 appcompat = "1.7.1"
 material = "1.13.0"
 viewpager2 = "1.1.0"
-litert = "1.4.0"
+litert = "2.1.5"
 
 [libraries]
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "cameraView" }
@@ -31,6 +31,8 @@ litert-metadata = { group = "com.google.ai.edge.litert", name = "litert-metadata
 litert-main = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 litert-support = { group = "com.google.ai.edge.litert", name = "litert-support", version.ref = "litert" }
 litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert" }
+tensorflow-lite-support = { group = "org.tensorflow", name = "tensorflow-lite-support" }
+tensorflow-lite-metadata = { group = "org.tensorflow", name = "tensorflow-lite-metadata" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
