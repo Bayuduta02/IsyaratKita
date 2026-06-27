@@ -11,6 +11,16 @@ import org.tensorflow.lite.Interpreter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/**
+ * Model wrapper untuk YOLO end-to-end TFLite (best_int8.tflite).
+ *
+ * metadata.yaml:
+ *   end2end: true, nms: false, imgsz: [640, 640], quantize: 8
+ *
+ * Output shape: [1, 300, 6]
+ *   format: [x1, y1, x2, y2, score, classIndex]
+ *   koordinat: NORMALIZED [0, 1]
+ */
 class Model private constructor(
     private val interpreter: Interpreter,
     private val labels: List<String>
@@ -20,8 +30,7 @@ class Model private constructor(
         private const val TAG = "Model"
         private const val MODEL_NAME = "best_int8.tflite"
         private const val LABELS_FILE = "labels.txt"
-        private const val CONF_THRESHOLD = 0.25f
-        private const val IOU_THRESHOLD = 0.45f
+        private const val CONF_THRESHOLD = 0.10f
 
         fun newInstance(context: Context): Model {
             val assetFileDescriptor = context.assets.openFd(MODEL_NAME)
@@ -37,15 +46,14 @@ class Model private constructor(
 
             if (modelBuffer.capacity() < 1000) {
                 throw RuntimeException(
-                    "File $MODEL_NAME terlalu kecil (${modelBuffer.capacity()} bytes). " +
-                            "Pastikan file model sudah benar di assets/$MODEL_NAME"
+                    "File $MODEL_NAME terlalu kecil (${modelBuffer.capacity()} bytes)."
                 )
             }
 
             Log.i(TAG, "✓ Model loaded: ${modelBuffer.capacity() / 1024}KB")
 
             val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
-            Log.i(TAG, "✓ Labels loaded: ${labels.size} classes")
+            Log.i(TAG, "✓ Labels loaded: ${labels.size} classes → ${labels.joinToString()}")
 
             val options = Interpreter.Options().apply {
                 numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
@@ -54,55 +62,49 @@ class Model private constructor(
 
             return try {
                 val interpreter = Interpreter(modelBuffer, options)
-                Log.i(TAG, "✓ Model initialized with CPU (XNNPACK enabled)")
+                Log.i(TAG, "✓ Interpreter initialized (XNNPACK enabled)")
                 Model(interpreter, labels)
             } catch (e: Exception) {
-                val errorMessage = when {
-                    e.message?.contains("Could not find") == true ->
-                        "Model file tidak ditemukan. Pastikan $MODEL_NAME ada di folder assets."
-                    e.message?.contains("Error loading model") == true ->
-                        "Error memuat model. File mungkin rusak atau tidak kompatibel."
-                    else -> "Error initializing TFLite Model: ${e.message}"
-                }
-                Log.e(TAG, errorMessage, e)
-                throw RuntimeException(errorMessage)
+                val msg = "Error initializing TFLite Model: ${e.message}"
+                Log.e(TAG, msg, e)
+                throw RuntimeException(msg)
             }
         }
     }
 
-    private val inputShape = interpreter.getInputTensor(0).shape()
-    private val inputDataType = interpreter.getInputTensor(0).dataType()
-    private val outputShape = interpreter.getOutputTensor(0).shape()
+    private val inputShape    = interpreter.getInputTensor(0).shape()
+    private val inputDType    = interpreter.getInputTensor(0).dataType()
+    private val outputCount   = interpreter.getOutputTensorCount()
+    private val outputDType   = interpreter.getOutputTensor(0).dataType()
 
     private val inputHeight: Int
     private val inputWidth: Int
-    private val channels: Int
     private val isChannelLast: Boolean
 
     private val inputBuffer: ByteBuffer
     private val outputBuffer: ByteBuffer
+    private var outputBuffers: Array<Any>? = null
+
+    // Reusable bitmap untuk resize
     private val reusableBitmap: Bitmap
-    private val canvas: Canvas
+    private val canvas = Canvas()
     private val srcRect = Rect()
     private val dstRect = Rect()
 
+    // Pixel buffer — reuse untuk menghindari alokasi setiap frame
+    private lateinit var pixels: IntArray
+
     init {
-        if (inputShape.size != 4) {
-            throw IllegalStateException("Expected 4D input tensor, got: ${inputShape.toList()}")
+        require(inputShape.size == 4) {
+            "Expected 4D input tensor, got: ${inputShape.toList()}"
         }
 
         when {
             inputShape[3] == 3 -> {
-                inputHeight = inputShape[1]
-                inputWidth = inputShape[2]
-                channels = inputShape[3]
-                isChannelLast = true
+                inputHeight = inputShape[1]; inputWidth = inputShape[2]; isChannelLast = true
             }
             inputShape[1] == 3 -> {
-                inputHeight = inputShape[2]
-                inputWidth = inputShape[3]
-                channels = inputShape[1]
-                isChannelLast = false
+                inputHeight = inputShape[2]; inputWidth = inputShape[3]; isChannelLast = false
             }
             else -> throw IllegalStateException("Unsupported input shape: ${inputShape.toList()}")
         }
@@ -110,20 +112,34 @@ class Model private constructor(
         inputBuffer = ByteBuffer.allocateDirect(interpreter.getInputTensor(0).numBytes())
             .order(ByteOrder.nativeOrder())
 
-        outputBuffer = ByteBuffer.allocateDirect(outputShape.fold(4) { acc, dim -> acc * dim })
-            .order(ByteOrder.nativeOrder())
+        if (outputCount > 1) {
+            val boxes   = Array(1) { Array(300) { FloatArray(4) } }
+            val classes = Array(1) { FloatArray(300) }
+            val scores  = Array(1) { FloatArray(300) }
+            val count   = FloatArray(1)
+            outputBuffers = arrayOf(boxes, classes, scores, count)
+            outputBuffer  = ByteBuffer.allocateDirect(0)
+        } else {
+            outputBuffer = ByteBuffer.allocateDirect(interpreter.getOutputTensor(0).numBytes())
+                .order(ByteOrder.nativeOrder())
+        }
 
         reusableBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
-        canvas = Canvas(reusableBitmap)
+        canvas.setBitmap(reusableBitmap)
         dstRect.set(0, 0, inputWidth, inputHeight)
+        pixels = IntArray(inputWidth * inputHeight)
 
-        Log.i(TAG, "Model ready: ${inputWidth}x${inputHeight}, channels=$channels, " +
-                "format=${if (isChannelLast) "NHWC" else "NCHW"}, dataType=$inputDataType")
+        Log.i(TAG, "Model ready → input: ${inputWidth}x${inputHeight} " +
+                "${if (isChannelLast) "NHWC" else "NCHW"} | inputType=$inputDType | outputType=$outputDType")
+        for (i in 0 until outputCount) {
+            Log.i(TAG, "  Output[$i] shape: ${interpreter.getOutputTensor(i).shape().contentToString()}")
+        }
     }
 
     data class DetectionResult(
         val classIndex: Int,
         val score: Float,
+        /** [x1, y1, x2, y2] dalam pixel ruang inputWidth×inputHeight (640×640) */
         val boundingBox: FloatArray,
         val label: String
     ) {
@@ -131,210 +147,254 @@ class Model private constructor(
             if (this === other) return true
             if (javaClass != other?.javaClass) return false
             other as DetectionResult
-            return classIndex == other.classIndex &&
-                    score == other.score &&
-                    boundingBox.contentEquals(other.boundingBox) &&
-                    label == other.label
+            return classIndex == other.classIndex && score == other.score &&
+                    boundingBox.contentEquals(other.boundingBox) && label == other.label
         }
-
         override fun hashCode(): Int {
-            var result = classIndex
-            result = 31 * result + score.hashCode()
-            result = 31 * result + boundingBox.contentHashCode()
-            result = 31 * result + label.hashCode()
-            return result
+            var r = classIndex
+            r = 31 * r + score.hashCode()
+            r = 31 * r + boundingBox.contentHashCode()
+            r = 31 * r + label.hashCode()
+            return r
         }
     }
 
     fun process(bitmap: Bitmap): Pair<List<DetectionResult>, Long> {
-        val startTime = SystemClock.elapsedRealtimeNanos()
-
-        val prepStart = SystemClock.elapsedRealtimeNanos()
+        val t0 = SystemClock.elapsedRealtimeNanos()
         preprocessImage(bitmap)
-        val prepTime = (SystemClock.elapsedRealtimeNanos() - prepStart) / 1_000_000
 
         val infStart = SystemClock.elapsedRealtimeNanos()
-        outputBuffer.rewind()
-        interpreter.run(inputBuffer, outputBuffer)
-        val infTime = (SystemClock.elapsedRealtimeNanos() - infStart) / 1_000_000
-
-        val postStart = SystemClock.elapsedRealtimeNanos()
-        outputBuffer.rewind()
-        val detections = postprocessDetections(outputBuffer)
-        val postTime = (SystemClock.elapsedRealtimeNanos() - postStart) / 1_000_000
-
-        val totalTime = (SystemClock.elapsedRealtimeNanos() - startTime) / 1_000_000
-
-        Log.d(TAG, "Prep:${prepTime}ms | Inf:${infTime}ms | Post:${postTime}ms | Total:${totalTime}ms | Det:${detections.size}")
-
-        return Pair(detections, totalTime)
-    }
-
-    private fun preprocessImage(bitmap: Bitmap) {
-        inputBuffer.rewind()
-
-        if (bitmap.width != inputWidth || bitmap.height != inputHeight) {
-            srcRect.set(0, 0, bitmap.width, bitmap.height)
-            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+        val detections = if (outputCount > 1) {
+            val outputs = mutableMapOf<Int, Any>()
+            outputBuffers!!.forEachIndexed { i, buf -> outputs[i] = buf }
+            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+            postprocessMultiOutput()
         } else {
-            canvas.drawBitmap(bitmap, 0f, 0f, null)
+            outputBuffer.rewind()
+            interpreter.run(inputBuffer, outputBuffer)
+            outputBuffer.rewind()
+            postprocessSingleOutput(outputBuffer)
         }
+        val infMs   = (SystemClock.elapsedRealtimeNanos() - infStart) / 1_000_000
+        val totalMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000
 
-        val pixelCount = inputWidth * inputHeight
-        val pixels = IntArray(pixelCount)
-        reusableBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
-
-        when (inputDataType) {
-            DataType.UINT8 -> {
-                if (isChannelLast) {
-                    for (pixel in pixels) {
-                        inputBuffer.put(((pixel shr 16) and 0xFF).toByte())
-                        inputBuffer.put(((pixel shr 8) and 0xFF).toByte())
-                        inputBuffer.put((pixel and 0xFF).toByte())
-                    }
-                } else {
-                    for (channel in 0 until 3) {
-                        val shift = 16 - (channel * 8)
-                        for (pixel in pixels) {
-                            inputBuffer.put(((pixel shr shift) and 0xFF).toByte())
-                        }
-                    }
-                }
-            }
-
-            DataType.FLOAT32 -> {
-                val floatBuffer = inputBuffer.asFloatBuffer()
-                val scale = 1f / 255f
-
-                if (isChannelLast) {
-                    for (pixel in pixels) {
-                        floatBuffer.put(((pixel shr 16) and 0xFF) * scale)
-                        floatBuffer.put(((pixel shr 8) and 0xFF) * scale)
-                        floatBuffer.put((pixel and 0xFF) * scale)
-                    }
-                } else {
-                    for (channel in 0 until 3) {
-                        val shift = 16 - (channel * 8)
-                        for (pixel in pixels) {
-                            floatBuffer.put(((pixel shr shift) and 0xFF) * scale)
-                        }
-                    }
-                }
-            }
-
-            else -> throw IllegalStateException("Unsupported data type: $inputDataType")
-        }
-
-        inputBuffer.rewind()
-    }
-
-    private fun postprocessDetections(outputBuffer: ByteBuffer): List<DetectionResult> {
-        val numBoxes = outputShape[2]
-        val numClasses = outputShape[1] - 4
-        val floatBuffer = outputBuffer.asFloatBuffer()
-
-        Log.i(TAG, "Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> $numClasses classes, $numBoxes boxes")
-
-        if (numClasses != labels.size) {
-            Log.w(TAG, "Warning: model has $numClasses classes but labels.txt has ${labels.size} entries!")
-        }
-
-        val candidates = mutableListOf<DetectionResult>()
-        val inputHeightF = inputHeight.toFloat()
-        val inputWidthF = inputWidth.toFloat()
-
-        for (boxIdx in 0 until numBoxes) {
-            val x = floatBuffer.get(boxIdx)
-            val y = floatBuffer.get(numBoxes + boxIdx)
-            val w = floatBuffer.get(2 * numBoxes + boxIdx)
-            val h = floatBuffer.get(3 * numBoxes + boxIdx)
-
-            var maxScore = 0f
-            var classIndex = -1
-
-            for (classIdx in 0 until numClasses) {
-                val score = floatBuffer.get((4 + classIdx) * numBoxes + boxIdx)
-                if (score > maxScore) {
-                    maxScore = score
-                    classIndex = classIdx
-                }
-            }
-
-            if (maxScore >= CONF_THRESHOLD && classIndex in labels.indices) {
-                val xCenter = x * inputWidthF
-                val yCenter = y * inputHeightF
-                val width = w * inputWidthF
-                val height = h * inputHeightF
-
-                val x1 = xCenter - width / 2
-                val y1 = yCenter - height / 2
-                val x2 = xCenter + width / 2
-                val y2 = yCenter + height / 2
-
-                if (candidates.isEmpty()) {
-                    Log.d(TAG, "First detection: x=$x, y=$y, w=$w, h=$h -> " +
-                            "x1=$x1, y1=$y1, x2=$x2, y2=$y2, score=$maxScore, class=${labels[classIndex]}")
-                }
-
-                candidates.add(
-                    DetectionResult(
-                        classIndex,
-                        maxScore,
-                        floatArrayOf(x1, y1, x2, y2),
-                        labels[classIndex]
-                    )
-                )
-            }
-        }
-
-        Log.d(TAG, "Candidates found: ${candidates.size} (before NMS)")
-
-        return if (candidates.size > 1) applyNMS(candidates) else candidates
-    }
-
-    private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
-        if (detections.isEmpty()) return emptyList()
-
-        val sorted = detections.sortedByDescending { it.score }
-        val keep = mutableListOf<DetectionResult>()
-        val suppressed = BooleanArray(sorted.size)
-
-        for (i in sorted.indices) {
-            if (suppressed[i]) continue
-            keep.add(sorted[i])
-
-            for (j in i + 1 until sorted.size) {
-                if (suppressed[j]) continue
-                if (sorted[i].classIndex == sorted[j].classIndex) {
-                    val iou = calculateIoU(sorted[i].boundingBox, sorted[j].boundingBox)
-                    if (iou > IOU_THRESHOLD) {
-                        suppressed[j] = true
-                    }
-                }
-            }
-        }
-
-        return keep
-    }
-
-    private fun calculateIoU(box1: FloatArray, box2: FloatArray): Float {
-        val x1 = maxOf(box1[0], box2[0])
-        val y1 = maxOf(box1[1], box2[1])
-        val x2 = minOf(box1[2], box2[2])
-        val y2 = minOf(box1[3], box2[3])
-
-        if (x2 <= x1 || y2 <= y1) return 0f
-
-        val intersection = (x2 - x1) * (y2 - y1)
-        val area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        val area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        val union = area1 + area2 - intersection
-
-        return if (union > 0f) intersection / union else 0f
+        Log.d(TAG, "Inference: ${infMs}ms | Total: ${totalMs}ms | Detections: ${detections.size}")
+        return Pair(detections, totalMs)
     }
 
     fun close() {
         interpreter.close()
         reusableBitmap.recycle()
+    }
+
+    // ── Pre-processing ────────────────────────────────────────────────────────
+
+    private fun preprocessImage(bitmap: Bitmap) {
+        inputBuffer.rewind()
+
+        // Resize ke inputWidth x inputHeight menggunakan canvas reusable
+        srcRect.set(0, 0, bitmap.width, bitmap.height)
+        canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+
+        // Ambil pixel sekali — reuse array
+        reusableBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
+
+        val qParams   = interpreter.getInputTensor(0).quantizationParams()
+        val scale     = qParams.scale
+        val zeroPoint = qParams.zeroPoint
+
+        when (inputDType) {
+            DataType.FLOAT32 -> {
+                // PERBAIKAN: Normalisasi [0, 255] → [0.0, 1.0]
+                val fb    = inputBuffer.asFloatBuffer()
+                val inv255 = 1f / 255f
+                for (px in pixels) {
+                    fb.put(((px shr 16) and 0xFF) * inv255)  // R
+                    fb.put(((px shr 8)  and 0xFF) * inv255)  // G
+                    fb.put((px          and 0xFF) * inv255)  // B
+                }
+            }
+            DataType.UINT8 -> {
+                for (px in pixels) {
+                    inputBuffer.put(((px shr 16) and 0xFF).toByte())
+                    inputBuffer.put(((px shr 8)  and 0xFF).toByte())
+                    inputBuffer.put((px           and 0xFF).toByte())
+                }
+            }
+            DataType.INT8 -> {
+                for (px in pixels) {
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8)  and 0xFF
+                    val b =  px         and 0xFF
+                    if (scale != 0f) {
+                        inputBuffer.put(((r / 255f / scale) + zeroPoint).toInt().toByte())
+                        inputBuffer.put(((g / 255f / scale) + zeroPoint).toInt().toByte())
+                        inputBuffer.put(((b / 255f / scale) + zeroPoint).toInt().toByte())
+                    } else {
+                        inputBuffer.put((r - 128).toByte())
+                        inputBuffer.put((g - 128).toByte())
+                        inputBuffer.put((b - 128).toByte())
+                    }
+                }
+            }
+            else -> throw IllegalStateException("Unsupported input type: $inputDType")
+        }
+
+        inputBuffer.rewind()
+    }
+
+    // ── Post-processing ───────────────────────────────────────────────────────
+
+    private fun postprocessMultiOutput(): List<DetectionResult> {
+        val boxes   = (outputBuffers!![0] as Array<*>)[0] as Array<FloatArray>
+        val classes = (outputBuffers!![1] as Array<*>)[0] as FloatArray
+        val scores  = (outputBuffers!![2] as Array<*>)[0] as FloatArray
+        val count   = (outputBuffers!![3] as FloatArray)[0].toInt()
+
+        val results = mutableListOf<DetectionResult>()
+        for (i in 0 until count) {
+            if (scores[i] < CONF_THRESHOLD) continue
+            val classIdx = classes[i].toInt()
+            if (classIdx !in labels.indices) continue
+            val x1 = boxes[i][1] * inputWidth
+            val y1 = boxes[i][0] * inputHeight
+            val x2 = boxes[i][3] * inputWidth
+            val y2 = boxes[i][2] * inputHeight
+            results.add(DetectionResult(classIdx, scores[i], floatArrayOf(x1, y1, x2, y2), labels[classIdx]))
+        }
+        return results.sortedByDescending { it.score }
+    }
+
+    private fun postprocessSingleOutput(buffer: ByteBuffer): List<DetectionResult> {
+        val tensor = interpreter.getOutputTensor(0)
+        val shape  = tensor.shape()
+
+        val floatData: FloatArray = if (outputDType == DataType.INT8 || outputDType == DataType.UINT8) {
+            val qp    = tensor.quantizationParams()
+            val qScale = qp.scale
+            val qZero  = qp.zeroPoint
+            val raw   = ByteArray(buffer.remaining())
+            buffer.get(raw)
+            FloatArray(raw.size) { i ->
+                val v = if (outputDType == DataType.UINT8) (raw[i].toInt() and 0xFF) else raw[i].toInt()
+                (v - qZero) * qScale
+            }
+        } else {
+            FloatArray(buffer.remaining() / 4).also { buffer.asFloatBuffer().get(it) }
+        }
+
+        return when {
+            shape.size == 3 && shape[2] == 6  -> parseEnd2End(floatData, shape[1])
+            shape.size == 3 && shape[1] > shape[2] -> parseTransposed(floatData, shape)
+            else -> parseStandard(floatData, shape)
+        }
+    }
+
+    /**
+     * End-to-end output: [1, numBoxes, 6]
+     * Format: [x1, y1, x2, y2, score, classIdx]
+     * Koordinat: NORMALIZED [0, 1] → konversi ke pixel
+     */
+    private fun parseEnd2End(data: FloatArray, numBoxes: Int): List<DetectionResult> {
+        val results = mutableListOf<DetectionResult>()
+
+        for (i in 0 until numBoxes) {
+            val offset = i * 6
+            val score  = data[offset + 4]
+            if (score > 0.05f) {
+                Log.d(TAG, "RAW[$i]: x1=${data[offset+0]} y1=${data[offset+1]} " +
+                        "x2=${data[offset+2]} y2=${data[offset+3]} " +
+                        "score=$score class=${data[offset+5].toInt()}")
+            }
+
+            if (score < CONF_THRESHOLD) continue
+
+            val classIdx = data[offset + 5].toInt()
+            if (classIdx !in labels.indices) continue
+
+            // Koordinat normalized 0-1 → pixel 640x640
+            val x1 = (data[offset + 0] * inputWidth).coerceIn(0f, inputWidth.toFloat())
+            val y1 = (data[offset + 1] * inputHeight).coerceIn(0f, inputHeight.toFloat())
+            val x2 = (data[offset + 2] * inputWidth).coerceIn(0f, inputWidth.toFloat())
+            val y2 = (data[offset + 3] * inputHeight).coerceIn(0f, inputHeight.toFloat())
+
+            if (x2 <= x1 || y2 <= y1) continue
+
+            results.add(DetectionResult(classIdx, score, floatArrayOf(x1, y1, x2, y2), labels[classIdx]))
+        }
+        return results.sortedByDescending { it.score }
+    }
+
+    private fun parseStandard(data: FloatArray, shape: IntArray): List<DetectionResult> {
+        val numBoxes   = shape[2]
+        val numClasses = shape[1] - 4
+        val candidates = mutableListOf<DetectionResult>()
+
+        for (b in 0 until numBoxes) {
+            var maxScore = 0f; var classIdx = -1
+            for (c in 0 until numClasses) {
+                val s = data[(4 + c) * numBoxes + b]
+                if (s > maxScore) { maxScore = s; classIdx = c }
+            }
+            if (maxScore < CONF_THRESHOLD || classIdx !in labels.indices) continue
+            val cx = data[b]; val cy = data[numBoxes + b]
+            val w  = data[2 * numBoxes + b]; val h = data[3 * numBoxes + b]
+            candidates.add(DetectionResult(classIdx, maxScore, floatArrayOf(
+                (cx - w / 2) * inputWidth, (cy - h / 2) * inputHeight,
+                (cx + w / 2) * inputWidth, (cy + h / 2) * inputHeight
+            ), labels[classIdx]))
+        }
+        return applyNMS(candidates)
+    }
+
+    private fun parseTransposed(data: FloatArray, shape: IntArray): List<DetectionResult> {
+        val numBoxes   = shape[1]
+        val numElems   = shape[2]
+        val numClasses = numElems - 4
+        val candidates = mutableListOf<DetectionResult>()
+
+        for (i in 0 until numBoxes) {
+            val off = i * numElems
+            var maxScore = 0f; var classIdx = -1
+            for (c in 0 until numClasses) {
+                val s = data[off + 4 + c]
+                if (s > maxScore) { maxScore = s; classIdx = c }
+            }
+            if (maxScore < CONF_THRESHOLD || classIdx !in labels.indices) continue
+            val cx = data[off]; val cy = data[off + 1]
+            val w  = data[off + 2]; val h = data[off + 3]
+            candidates.add(DetectionResult(classIdx, maxScore, floatArrayOf(
+                (cx - w / 2) * inputWidth, (cy - h / 2) * inputHeight,
+                (cx + w / 2) * inputWidth, (cy + h / 2) * inputHeight
+            ), labels[classIdx]))
+        }
+        return applyNMS(candidates)
+    }
+
+    private fun applyNMS(detections: List<DetectionResult>, iouThresh: Float = 0.45f): List<DetectionResult> {
+        if (detections.isEmpty()) return emptyList()
+        val sorted = detections.sortedByDescending { it.score }
+        val suppressed = BooleanArray(sorted.size)
+        val keep = mutableListOf<DetectionResult>()
+        for (i in sorted.indices) {
+            if (suppressed[i]) continue
+            keep.add(sorted[i])
+            for (j in i + 1 until sorted.size) {
+                if (!suppressed[j] && sorted[i].classIndex == sorted[j].classIndex) {
+                    if (iou(sorted[i].boundingBox, sorted[j].boundingBox) > iouThresh)
+                        suppressed[j] = true
+                }
+            }
+        }
+        return keep
+    }
+
+    private fun iou(a: FloatArray, b: FloatArray): Float {
+        val ix1 = maxOf(a[0], b[0]); val iy1 = maxOf(a[1], b[1])
+        val ix2 = minOf(a[2], b[2]); val iy2 = minOf(a[3], b[3])
+        if (ix2 <= ix1 || iy2 <= iy1) return 0f
+        val inter = (ix2 - ix1) * (iy2 - iy1)
+        val union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
+        return if (union > 0f) inter / union else 0f
     }
 }

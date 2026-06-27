@@ -69,10 +69,10 @@ class OverlayView @JvmOverloads constructor(
 
         // --- PERBAIKAN ---
         // Logika penskalaan yang benar.
-        // Hasil deteksi (detections) memiliki koordinat dalam sistem 320x320 (ukuran input model).
+        // Hasil deteksi (detections) memiliki koordinat dalam sistem 640x640 (ukuran input model).
         // Kita perlu mengubahnya ke sistem koordinat View ini.
-        val scaleX = viewWidth.toFloat() / 320f
-        val scaleY = viewHeight.toFloat() / 320f
+        val scaleX = viewWidth.toFloat() / 640f
+        val scaleY = viewHeight.toFloat() / 640f
 
         for (detection in detections) {
             // Mengalikan koordinat asli dengan faktor skala
