@@ -148,7 +148,7 @@ class KameraGestureActivity : AppCompatActivity() {
     private fun initializeModel() {
         try {
             val assetManager = assets
-            val modelExists = assetManager.list("")?.contains("model.tflite") ?: false
+            val modelExists = assetManager.list("")?.contains("best_int8.tflite") ?: false
             val labelsExists = assetManager.list("")?.contains("labels.txt") ?: false
 
             if (!modelExists || !labelsExists) {

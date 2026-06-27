@@ -94,6 +94,6 @@ class YuvToRgbConverter(context: Context) {
             inputAllocation!!.type.x != image.width ||   // image size changed
             inputAllocation!!.type.y != image.height ||
             inputAllocation!!.type.yuv != yuvBuffer.type || // image format changed
-            bytes.size == yuvBuffer.buffer.capacity())
+            bytes.size != yuvBuffer.buffer.capacity())
     }
 }
