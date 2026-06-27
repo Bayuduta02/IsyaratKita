@@ -1,16 +1,16 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
 }
 
 android {
     namespace = "com.example.isyaratkita"
-    compileSdk = 37
+    val latestSdk = 37
+    compileSdk = latestSdk
 
     defaultConfig {
         applicationId = "com.example.isyaratkita"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = latestSdk
         versionCode = 1
         versionName = "1.0"
 
@@ -55,11 +55,11 @@ android {
             )
         }
     }
+}
 
-    kotlin {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
-        }
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
 }
 
