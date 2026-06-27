@@ -8,9 +8,6 @@ import android.os.SystemClock
 import android.util.Log
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
-import org.tensorflow.lite.gpu.GpuDelegate
-import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -21,64 +18,50 @@ class Model private constructor(
 
     companion object {
         private const val TAG = "Model"
-        private const val MODEL_NAME = "model.tflite"
+        private const val MODEL_NAME = "best_int8.tflite"
         private const val LABELS_FILE = "labels.txt"
-        // Model: YOLOv8 int8, 320x320, NMS=false (manual NMS required)
         private const val CONF_THRESHOLD = 0.25f
         private const val IOU_THRESHOLD = 0.45f
 
         fun newInstance(context: Context): Model {
-            val modelBuffer = FileUtil.loadMappedFile(context, MODEL_NAME)
+            val assetFileDescriptor = context.assets.openFd(MODEL_NAME)
+            val inputStream = assetFileDescriptor.createInputStream()
+            val modelBytes = inputStream.readBytes()
+            inputStream.close()
+            assetFileDescriptor.close()
 
-            // Validasi ukuran model (expected: ~3MB for int8 quantized)
+            val modelBuffer = ByteBuffer.allocateDirect(modelBytes.size)
+                .order(ByteOrder.nativeOrder())
+            modelBuffer.put(modelBytes)
+            modelBuffer.rewind()
+
             if (modelBuffer.capacity() < 1000) {
-                throw RuntimeException("File model.tflite terlalu kecil (${modelBuffer.capacity()} bytes). " +
-                        "Expected: ~3MB (3000KB). Pastikan file model sudah benar di assets/model.tflite")
+                throw RuntimeException(
+                    "File $MODEL_NAME terlalu kecil (${modelBuffer.capacity()} bytes). " +
+                            "Pastikan file model sudah benar di assets/$MODEL_NAME"
+                )
             }
 
             Log.i(TAG, "✓ Model loaded: ${modelBuffer.capacity() / 1024}KB")
 
             val labels = context.assets.open(LABELS_FILE).bufferedReader().readLines()
+            Log.i(TAG, "✓ Labels loaded: ${labels.size} classes")
 
-            // int8 quantized model - CPU dengan XNNPACK optimal
-            val baseOptions = Interpreter.Options().apply {
-                setNumThreads(Runtime.getRuntime().availableProcessors().coerceAtMost(4))
-                setUseXNNPACK(true)
+            val options = Interpreter.Options().apply {
+                numThreads = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
+                useXNNPACK = true
             }
 
-            // Try GPU first (biasanya lebih lambat untuk int8, tapi coba dulu)
-            try {
-                val compatList = CompatibilityList()
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    val gpuOptions = Interpreter.Options(baseOptions)
-                    val gpuDelegate = GpuDelegate()
-                    gpuOptions.addDelegate(gpuDelegate)
-                    Log.d(TAG, "Attempting to use GPU Delegate.")
-
-                    val interpreter = Interpreter(modelBuffer, gpuOptions)
-                    Log.i(TAG, "✓ Model initialized with GPU delegate.")
-                    return Model(interpreter, labels)
-                } else {
-                    Log.d(TAG, "GPU Delegate not supported on this device.")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "GPU delegate failed: ${e.message}. Using CPU with XNNPACK.")
-            }
-
-            // Fallback to CPU with XNNPACK (optimal untuk int8)
-            try {
-                Log.d(TAG, "Using CPU with XNNPACK for inference.")
-                val interpreter = Interpreter(modelBuffer, baseOptions)
-                Log.i(TAG, "✓ Model initialized with CPU (XNNPACK enabled).")
-                return Model(interpreter, labels)
+            return try {
+                val interpreter = Interpreter(modelBuffer, options)
+                Log.i(TAG, "✓ Model initialized with CPU (XNNPACK enabled)")
+                Model(interpreter, labels)
             } catch (e: Exception) {
                 val errorMessage = when {
                     e.message?.contains("Could not find") == true ->
                         "Model file tidak ditemukan. Pastikan $MODEL_NAME ada di folder assets."
                     e.message?.contains("Error loading model") == true ->
                         "Error memuat model. File mungkin rusak atau tidak kompatibel."
-                    e.message?.contains("labels") == true ->
-                        "File label tidak ditemukan. Pastikan $LABELS_FILE ada di folder assets."
                     else -> "Error initializing TFLite Model: ${e.message}"
                 }
                 Log.e(TAG, errorMessage, e)
@@ -87,7 +70,6 @@ class Model private constructor(
         }
     }
 
-    // Cache input/output tensor info
     private val inputShape = interpreter.getInputTensor(0).shape()
     private val inputDataType = interpreter.getInputTensor(0).dataType()
     private val outputShape = interpreter.getOutputTensor(0).shape()
@@ -97,7 +79,6 @@ class Model private constructor(
     private val channels: Int
     private val isChannelLast: Boolean
 
-    // Pre-allocated buffers (reuse untuk setiap inference)
     private val inputBuffer: ByteBuffer
     private val outputBuffer: ByteBuffer
     private val reusableBitmap: Bitmap
@@ -110,7 +91,6 @@ class Model private constructor(
             throw IllegalStateException("Expected 4D input tensor, got: ${inputShape.toList()}")
         }
 
-        // Parse input shape
         when {
             inputShape[3] == 3 -> {
                 inputHeight = inputShape[1]
@@ -127,20 +107,18 @@ class Model private constructor(
             else -> throw IllegalStateException("Unsupported input shape: ${inputShape.toList()}")
         }
 
-        // Pre-allocate buffers (sekali saja)
         inputBuffer = ByteBuffer.allocateDirect(interpreter.getInputTensor(0).numBytes())
             .order(ByteOrder.nativeOrder())
 
         outputBuffer = ByteBuffer.allocateDirect(outputShape.fold(4) { acc, dim -> acc * dim })
             .order(ByteOrder.nativeOrder())
 
-        // Reusable bitmap dan canvas untuk scaling cepat
         reusableBitmap = Bitmap.createBitmap(inputWidth, inputHeight, Bitmap.Config.ARGB_8888)
         canvas = Canvas(reusableBitmap)
         dstRect.set(0, 0, inputWidth, inputHeight)
 
         Log.i(TAG, "Model ready: ${inputWidth}x${inputHeight}, channels=$channels, " +
-                "format=${if(isChannelLast) "NHWC" else "NCHW"}, dataType=$inputDataType")
+                "format=${if (isChannelLast) "NHWC" else "NCHW"}, dataType=$inputDataType")
     }
 
     data class DetectionResult(
@@ -171,18 +149,15 @@ class Model private constructor(
     fun process(bitmap: Bitmap): Pair<List<DetectionResult>, Long> {
         val startTime = SystemClock.elapsedRealtimeNanos()
 
-        // 1. Preprocessing
         val prepStart = SystemClock.elapsedRealtimeNanos()
         preprocessImage(bitmap)
         val prepTime = (SystemClock.elapsedRealtimeNanos() - prepStart) / 1_000_000
 
-        // 2. Inference
         val infStart = SystemClock.elapsedRealtimeNanos()
         outputBuffer.rewind()
         interpreter.run(inputBuffer, outputBuffer)
         val infTime = (SystemClock.elapsedRealtimeNanos() - infStart) / 1_000_000
 
-        // 3. Postprocessing
         val postStart = SystemClock.elapsedRealtimeNanos()
         outputBuffer.rewind()
         val detections = postprocessDetections(outputBuffer)
@@ -190,18 +165,14 @@ class Model private constructor(
 
         val totalTime = (SystemClock.elapsedRealtimeNanos() - startTime) / 1_000_000
 
-        Log.d(TAG, "⏱ Prep:${prepTime}ms | Inf:${infTime}ms | Post:${postTime}ms | Total:${totalTime}ms | Det:${detections.size}")
+        Log.d(TAG, "Prep:${prepTime}ms | Inf:${infTime}ms | Post:${postTime}ms | Total:${totalTime}ms | Det:${detections.size}")
 
         return Pair(detections, totalTime)
     }
 
-    /**
-     * Preprocessing optimized dengan Canvas (lebih cepat dari createScaledBitmap)
-     */
     private fun preprocessImage(bitmap: Bitmap) {
         inputBuffer.rewind()
 
-        // Fast scaling dengan Canvas
         if (bitmap.width != inputWidth || bitmap.height != inputHeight) {
             srcRect.set(0, 0, bitmap.width, bitmap.height)
             canvas.drawBitmap(bitmap, srcRect, dstRect, null)
@@ -209,23 +180,19 @@ class Model private constructor(
             canvas.drawBitmap(bitmap, 0f, 0f, null)
         }
 
-        // Copy pixels
         val pixelCount = inputWidth * inputHeight
         val pixels = IntArray(pixelCount)
         reusableBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
         when (inputDataType) {
             DataType.UINT8 -> {
-                // int8 quantized model - langsung masukkan byte [0-255]
                 if (isChannelLast) {
-                    // NHWC: [R,G,B, R,G,B, ...]
                     for (pixel in pixels) {
-                        inputBuffer.put(((pixel shr 16) and 0xFF).toByte()) // R
-                        inputBuffer.put(((pixel shr 8) and 0xFF).toByte())  // G
-                        inputBuffer.put((pixel and 0xFF).toByte())          // B
+                        inputBuffer.put(((pixel shr 16) and 0xFF).toByte())
+                        inputBuffer.put(((pixel shr 8) and 0xFF).toByte())
+                        inputBuffer.put((pixel and 0xFF).toByte())
                     }
                 } else {
-                    // NCHW: [R,R,R... G,G,G... B,B,B...]
                     for (channel in 0 until 3) {
                         val shift = 16 - (channel * 8)
                         for (pixel in pixels) {
@@ -236,7 +203,6 @@ class Model private constructor(
             }
 
             DataType.FLOAT32 -> {
-                // Float model - normalize ke [0, 1]
                 val floatBuffer = inputBuffer.asFloatBuffer()
                 val scale = 1f / 255f
 
@@ -262,41 +228,27 @@ class Model private constructor(
         inputBuffer.rewind()
     }
 
-    /**
-     * Postprocessing dengan NMS (karena metadata nms: false)
-     *
-     * Output format YOLOv8:
-     * - 640x640: [1, 30, 8400] => (4 bbox + 26 classes), 8400 anchors
-     * - 320x320: [1, 30, 2100] => (4 bbox + 26 classes), 2100 anchors
-     *
-     * Bbox format: [x_center, y_center, width, height] dalam normalized coords [0-1]
-     */
     private fun postprocessDetections(outputBuffer: ByteBuffer): List<DetectionResult> {
         val numBoxes = outputShape[2]
-        val numClasses = outputShape[1] - 4 // 26 classes untuk A-Z
+        val numClasses = outputShape[1] - 4
         val floatBuffer = outputBuffer.asFloatBuffer()
 
-        Log.i(TAG, "\u2192 Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> ${numClasses} classes, ${numBoxes} boxes")
+        Log.i(TAG, "Output shape: [${outputShape[0]}, ${outputShape[1]}, ${outputShape[2]}] -> $numClasses classes, $numBoxes boxes")
 
-        // Validasi output shape
-        if (numClasses != 26) {
-            Log.w(TAG, "\u26a0\ufe0f Expected 26 classes, got $numClasses. Check model labels!")
+        if (numClasses != labels.size) {
+            Log.w(TAG, "Warning: model has $numClasses classes but labels.txt has ${labels.size} entries!")
         }
 
         val candidates = mutableListOf<DetectionResult>()
-
         val inputHeightF = inputHeight.toFloat()
         val inputWidthF = inputWidth.toFloat()
 
-        // Parse detections
         for (boxIdx in 0 until numBoxes) {
-            // Baca bbox coordinates [x_center, y_center, width, height] (normalized 0-1)
             val x = floatBuffer.get(boxIdx)
             val y = floatBuffer.get(numBoxes + boxIdx)
             val w = floatBuffer.get(2 * numBoxes + boxIdx)
             val h = floatBuffer.get(3 * numBoxes + boxIdx)
 
-            // Cari class dengan score tertinggi
             var maxScore = 0f
             var classIndex = -1
 
@@ -308,10 +260,7 @@ class Model private constructor(
                 }
             }
 
-            // Filter by confidence
             if (maxScore >= CONF_THRESHOLD && classIndex in labels.indices) {
-                // Convert to pixel coordinates [x1, y1, x2, y2]
-                // Koordinat dari model kemungkinan sudah normalized [0-1] atau dalam pixel
                 val xCenter = x * inputWidthF
                 val yCenter = y * inputHeightF
                 val width = w * inputWidthF
@@ -323,7 +272,8 @@ class Model private constructor(
                 val y2 = yCenter + height / 2
 
                 if (candidates.isEmpty()) {
-                    Log.d(TAG, "First detection: x=$x, y=$y, w=$w, h=$h -> x1=$x1, y1=$y1, x2=$x2, y2=$y2, score=$maxScore, class=${labels[classIndex]}")
+                    Log.d(TAG, "First detection: x=$x, y=$y, w=$w, h=$h -> " +
+                            "x1=$x1, y1=$y1, x2=$x2, y2=$y2, score=$maxScore, class=${labels[classIndex]}")
                 }
 
                 candidates.add(
@@ -339,41 +289,22 @@ class Model private constructor(
 
         Log.d(TAG, "Candidates found: ${candidates.size} (before NMS)")
 
-        // Apply NMS
-        val finalResults = if (candidates.size > 1) {
-            applyNMS(candidates)
-        } else {
-            candidates
-        }
-
-        if (finalResults.isEmpty() && candidates.isEmpty()) {
-            Log.d(TAG, "⚠️ No detections above confidence threshold ($CONF_THRESHOLD)")
-        }
-
-        return finalResults
+        return if (candidates.size > 1) applyNMS(candidates) else candidates
     }
 
-    /**
-     * Non-Maximum Suppression - menghapus deteksi duplikat
-     */
     private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
         if (detections.isEmpty()) return emptyList()
 
-        // Sort by score (descending)
         val sorted = detections.sortedByDescending { it.score }
         val keep = mutableListOf<DetectionResult>()
         val suppressed = BooleanArray(sorted.size)
 
         for (i in sorted.indices) {
             if (suppressed[i]) continue
-
             keep.add(sorted[i])
 
-            // Suppress overlapping boxes dari class yang sama
             for (j in i + 1 until sorted.size) {
                 if (suppressed[j]) continue
-
-                // Hanya NMS untuk class yang sama
                 if (sorted[i].classIndex == sorted[j].classIndex) {
                     val iou = calculateIoU(sorted[i].boundingBox, sorted[j].boundingBox)
                     if (iou > IOU_THRESHOLD) {
@@ -386,9 +317,6 @@ class Model private constructor(
         return keep
     }
 
-    /**
-     * Calculate Intersection over Union
-     */
     private fun calculateIoU(box1: FloatArray, box2: FloatArray): Float {
         val x1 = maxOf(box1[0], box2[0])
         val y1 = maxOf(box1[1], box2[1])

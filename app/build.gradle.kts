@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.example.isyaratkita"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.example.isyaratkita"
@@ -31,36 +31,40 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
     buildFeatures {
-        mlModelBinding = true
-    }
-    aaptOptions {
-        noCompress += "tflite"
+        mlModelBinding = false
     }
     androidResources {
         noCompress += "tflite"
     }
 
-    // Mengabaikan peringatan alignment untuk library native
-    packagingOptions {
+    packaging {
         jniLibs {
             useLegacyPackaging = false
         }
         resources {
-            excludes += listOf("META-INF/DEPENDENCIES", "META-INF/LICENSE", "META-INF/LICENSE.txt", "META-INF/license.txt", "META-INF/NOTICE", "META-INF/NOTICE.txt", "META-INF/notice.txt", "META-INF/ASL2.0")
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/license.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/notice.txt",
+                "META-INF/ASL2.0"
+            )
+        }
+    }
+
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
         }
     }
 }
 
 dependencies {
-
-    implementation(libs.litert.metadata)
     implementation(libs.litert.main)
-    implementation(libs.litert.support)
-    implementation(libs.litert.gpu)
 
     implementation(libs.androidx.viewpager2)
     implementation(libs.androidx.exifinterface)
@@ -73,8 +77,6 @@ dependencies {
     implementation(libs.androidx.camera.extensions)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.core)
-    implementation(libs.tensorflow.lite.support)
-    implementation(libs.tensorflow.lite.metadata)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
