@@ -145,8 +145,8 @@ class KameraGestureActivity : AppCompatActivity() {
         try {
             // Cek hanya file TFLite — label sudah embed di dalam model YOLO26
             val assetList = assets.list("") ?: emptyArray()
-            if (!assetList.contains("best_int8.tflite"))
-                throw Exception("File best_int8.tflite tidak ditemukan di assets")
+            if (!assetList.contains("model.tflite"))
+                throw Exception("File model.tflite tidak ditemukan di assets")
 
             yuvToRgbConverter = YuvToRgbConverter(this)
             modelBinding = YoloModelBinding(this)

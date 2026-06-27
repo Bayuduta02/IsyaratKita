@@ -28,7 +28,7 @@ class Model private constructor(
 
     companion object {
         private const val TAG = "Model"
-        private const val MODEL_NAME = "best_int8.tflite"
+        private const val MODEL_NAME = "model.tflite"
         private const val LABELS_FILE = "labels.txt"
         private const val CONF_THRESHOLD = 0.10f
 
