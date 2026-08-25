@@ -178,7 +178,11 @@ class Model private constructor(
         val infMs   = (SystemClock.elapsedRealtimeNanos() - infStart) / 1_000_000
         val totalMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000
 
-        Log.d(TAG, "Inference: ${infMs}ms | Total: ${totalMs}ms | Detections: ${detections.size}")
+        if (detections.isEmpty()) {
+            Log.d(TAG, "Inference: ${infMs}ms | Total: ${totalMs}ms | Detections: 0 | maxScore=${String.format("%.3f", peekMaxScore())}")
+        } else {
+            Log.d(TAG, "Inference: ${infMs}ms | Total: ${totalMs}ms | Detections: ${detections.size}")
+        }
         return Pair(detections, totalMs)
     }
 
@@ -265,6 +269,33 @@ class Model private constructor(
         return results.sortedByDescending { it.score }
     }
 
+    private fun peekMaxScore(): Float {
+        outputBuffer.rewind()
+        val tensor = interpreter.getOutputTensor(0)
+        val shape = tensor.shape()
+        if (shape.size != 3 || shape[2] != 6) return 0f
+
+        val floatData: FloatArray = if (outputDType == DataType.INT8 || outputDType == DataType.UINT8) {
+            val qp = tensor.quantizationParams()
+            val raw = ByteArray(outputBuffer.remaining())
+            outputBuffer.get(raw)
+            FloatArray(raw.size) { i ->
+                val v = if (outputDType == DataType.UINT8) (raw[i].toInt() and 0xFF) else raw[i].toInt()
+                (v - qp.zeroPoint) * qp.scale
+            }
+        } else {
+            FloatArray(outputBuffer.remaining() / 4).also { outputBuffer.asFloatBuffer().get(it) }
+        }
+
+        var maxScore = 0f
+        val numBoxes = shape[1]
+        for (i in 0 until numBoxes) {
+            maxScore = maxOf(maxScore, floatData[i * 6 + 4])
+        }
+        outputBuffer.rewind()
+        return maxScore
+    }
+
     private fun postprocessSingleOutput(buffer: ByteBuffer): List<DetectionResult> {
         val tensor = interpreter.getOutputTensor(0)
         val shape  = tensor.shape()
@@ -309,7 +340,7 @@ class Model private constructor(
 
             if (score < CONF_THRESHOLD) continue
 
-            val classIdx = data[offset + 5].toInt()
+            val classIdx = kotlin.math.round(data[offset + 5]).toInt()
             if (classIdx !in labels.indices) continue
 
             // Koordinat normalized 0-1 → pixel 640x640

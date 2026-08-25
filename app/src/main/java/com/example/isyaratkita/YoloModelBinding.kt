@@ -8,20 +8,21 @@ import com.example.isyaratkita.ml.Model
 import kotlin.math.max
 import kotlin.math.min
 
-class YoloModelBinding(private val context: Context) {
+class YoloModelBinding(context: Context) {
     private var model: Model? = null
     private val tag = "YoloModelBinding"
+    val initError: String?
 
-    // --- PERBAIKAN ---
-    // Konstanta iouThreshold dan maxDetections tidak lagi diperlukan
-    // karena NMS sudah ada di dalam model.
+    val isReady: Boolean get() = model != null
 
     init {
-        try {
+        initError = try {
             model = Model.newInstance(context)
             Log.d(tag, "Model initialized successfully")
+            null
         } catch (e: Exception) {
-            Log.e(tag, "Error initializing model: ${e.message}")
+            Log.e(tag, "Error initializing model: ${e.message}", e)
+            e.message
         }
     }
 

@@ -8,8 +8,8 @@
     android:background="@android:color/black"
     tools:context=".KameraGestureActivity">
 
-    <!-- Camera Preview menggunakan AutoFitSurfaceView - fullscreen -->
-    <com.example.isyaratkita.utils.AutoFitSurfaceView
+    <!-- CameraX PreviewView — otomatis handle rotasi & kompatibilitas vendor (iQOO/vivo) -->
+    <androidx.camera.view.PreviewView
         android:id="@+id/camera_preview"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
